@@ -37,22 +37,41 @@ const date=v=>v?new Intl.DateTimeFormat('th-TH',{dateStyle:'medium'}).format(new
 const dt=v=>v?new Intl.DateTimeFormat('th-TH',{dateStyle:'short',timeStyle:'short'}).format(new Date(v)): '-';
 const statusClass=s=>'status-'+String(s).replace(/\s|\//g,'-');
 const SLOW_CALLS=['getInitialData','uploadFiles','reportSummary','listOpportunities'];
+// ===== ที่อยู่หลังบ้าน (Apps Script) =====
+// ถ้าย้าย deployment ใหม่ ให้แก้บรรทัดนี้บรรทัดเดียว
+const API_URL='https://script.google.com/macros/s/AKfycbwKK1DJqGRX9czppOSWNZiDn7uWSP5-BwOdcYBSf1XfDef1lPmKJ7UhcTZnbo_ClYt7/exec';
+
+// เปิดจาก Apps Script โดยตรง = ใช้ google.script.run
+// เปิดจาก GitHub Pages หรือที่อื่น = ยิง POST ไปที่ API_URL
+const INSIDE_GAS=(typeof google!=="undefined"&&google.script&&google.script.run);
+function srv(payload){
+  if(INSIDE_GAS){
+    return new Promise(resolve=>{
+      const r=google.script.run.withSuccessHandler(x=>resolve(x)).withFailureHandler(e=>resolve({success:false,message:(e&&e.message)||"Server Error"}));
+      if(payload.action==="signIn")r.signIn(payload.pin);
+      else r.apiCall(payload.name,payload.session,payload.args);
+    });
+  }
+  return fetch(API_URL,{
+    method:"POST",
+    headers:{"Content-Type":"text/plain;charset=utf-8"},
+    body:JSON.stringify(payload),
+    redirect:"follow"
+  }).then(r=>r.json()).catch(e=>({success:false,message:"ติดต่อเซิร์ฟเวอร์ไม่ได้: "+e.message}));
+}
+
 const SESSION={pin:'',userId:''};
 function loadSession(){try{const s=JSON.parse(localStorage.getItem("pts_session")||"{}");SESSION.pin=s.pin||"";SESSION.userId=s.userId||""}catch(e){}}
 function saveSession(){try{localStorage.setItem("pts_session",JSON.stringify(SESSION))}catch(e){}}
 function clearSession(){SESSION.pin="";SESSION.userId="";try{localStorage.removeItem("pts_session")}catch(e){}}
-function call(name,...args){return new Promise(resolve=>{
-  if(typeof google==="undefined"||!google.script||!google.script.run){
-    return resolve({success:false,message:"ต้องเปิดจากลิงก์ของระบบเท่านั้น"});
-  }
-  const t=setTimeout(()=>resolve({success:false,message:"เชื่อมต่อไม่สำเร็จ (หมดเวลา) กรุณาลองใหม่"}),90000);
-  try{
-    google.script.run
-      .withSuccessHandler(r=>{clearTimeout(t);resolve(r&&typeof r==="object"?r:{success:false,message:"คำตอบจากเซิร์ฟเวอร์ผิดรูปแบบ"})})
-      .withFailureHandler(e=>{clearTimeout(t);resolve({success:false,message:(e&&e.message)||"Server Error"})})
-      .apiCall(name,{pin:SESSION.pin,userId:SESSION.userId},args);
-  }catch(err){clearTimeout(t);resolve({success:false,message:err.message})}
-})}
+function call(name,...args){
+  const t=new Promise(resolve=>setTimeout(()=>resolve({success:false,message:"เชื่อมต่อไม่สำเร็จ (หมดเวลา) กรุณาลองใหม่"}),90000));
+  return Promise.race([
+    srv({name:name,session:{pin:SESSION.pin,userId:SESSION.userId},args:args})
+      .then(r=>r&&typeof r==="object"?r:{success:false,message:"คำตอบจากเซิร์ฟเวอร์ผิดรูปแบบ"}),
+    t
+  ]);
+}
 function toast(message,ok=false){const x=$('#toast');x.textContent=message;x.className=`fixed right-4 top-4 z-50 rounded-xl px-4 py-3 text-sm shadow-lg ${ok?'bg-emerald-600 text-white':'bg-rose-600 text-white'}`;x.classList.remove('hidden');setTimeout(()=>x.classList.add('hidden'),3200)}
 const nowLocal=()=>{const d=new Date();d.setMinutes(d.getMinutes()-d.getTimezoneOffset());return d.toISOString().slice(0,16)};
 const myName=()=>state.user?.Name||state.user?.Email||'';
@@ -89,7 +108,7 @@ function pinScreen(msg){
     const pin=box.value.trim();
     if(pin.length<4){$("#pinMsg").textContent="กรุณาใส่รหัสให้ครบ";return}
     btn.disabled=true;btn.textContent="กำลังตรวจสอบ…";
-    const r=await new Promise(res=>google.script.run.withSuccessHandler(res).withFailureHandler(e=>res({success:false,message:e.message})).signIn(pin));
+    const r=await srv({action:"signIn",pin:pin});
     btn.disabled=false;btn.textContent="เข้าสู่ระบบ";
     if(!r||!r.success){$("#pinMsg").textContent=(r&&r.message)||"รหัสไม่ถูกต้อง";box.select();return}
     SESSION.pin=pin;
