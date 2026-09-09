@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="robots" content="noindex, nofollow">
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+  <meta name="referrer" content="same-origin">
   <meta name="theme-color" content="#0f766e">
   <title>PTS Sales</title>
 
@@ -21,18 +22,31 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
 
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!--
+    เริ่มจับมือกับเซิร์ฟเวอร์ Apps Script ตั้งแต่ตอนที่ยังอ่านไฟล์ HTML อยู่
+    ทำให้ตอนยิงคำขอจริงไม่ต้องเสียเวลา DNS + TLS ใหม่ (ประหยัดได้ราว 200-400 ms บนมือถือ)
+  -->
+  <link rel="preconnect" href="https://script.google.com" crossorigin>
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
+
+  <!-- ฟอนต์โหลดแบบไม่บล็อกการวาดหน้าจอ (display=swap) ระหว่างรอจะใช้ฟอนต์ระบบไปก่อน -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Prompt:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+
   <link rel="stylesheet" href="styles.css">
 </head>
-<body class="bg-slate-50 text-slate-800">
-  <main id="app" class="mx-auto min-h-screen max-w-5xl pb-24">
-    <div class="flex min-h-screen flex-col items-center justify-center gap-4 p-6">
-      <img src="logo-mark.png" alt="PAKORN Technical Supply" class="h-16 w-auto">
-      <p class="text-sm text-slate-500">กำลังเปิด PTS Sales…</p>
+<body>
+  <main id="app" class="app">
+    <div class="splash">
+      <img src="logo-mark.png" alt="PAKORN Technical Supply" width="72" height="72" style="height:72px;width:auto">
+      <div class="spinner"></div>
+      <p>กำลังเปิด PTS Sales…</p>
     </div>
   </main>
-  <nav id="nav" class="fixed bottom-0 left-0 right-0 z-20 mx-auto flex max-w-5xl justify-around border-t bg-white py-2 shadow-lg"></nav>
-  <div id="toast" class="fixed right-4 top-4 z-50 hidden rounded-xl px-4 py-3 text-sm shadow-lg"></div>
+
+  <nav id="nav" class="nav" hidden></nav>
+  <div id="toast" class="toast" hidden></div>
 
   <script src="config.js"></script>
   <script src="app.js"></script>

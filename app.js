@@ -1,109 +1,1166 @@
-// PTS Sales - หน้าเว็บ (GitHub Pages)
+// PTS Sales — หน้าเว็บ (GitHub Pages)
 // ตั้งค่าลิงก์ API ที่ไฟล์ config.js
 // ไฟล์นี้เป็นโค้ดสาธารณะ ห้ามใส่รหัสผ่าน คีย์ หรือข้อมูลลูกค้าใดๆ ลงในนี้
+//
+// ===========================================================================
+// สถาปัตยกรรม (แบบเดียวกับ PKT APP)
+//
+// แบบเดิม  ทุกครั้งที่กดปุ่ม -> ล้างหน้าจอ -> ยิงคำขอ -> รอ Apps Script 1-3 วินาที -> ค่อยวาด
+//          เปิดแอปหนึ่งครั้งกด 5 หน้า = รอเน็ต 5 รอบ
+//
+// แบบใหม่  โหลด "snapshot" (ข้อมูลทั้งระบบ) ครั้งเดียวตอนเปิดแอป เก็บไว้ในเครื่อง
+//          แล้ววาดทุกหน้าจากข้อมูลก้อนนั้น การกดเปลี่ยนหน้า/ค้นหา/กรอง จึงเกิดขึ้นทันที
+//          ไม่แตะเน็ตเลย
+//
+//          ความสดของข้อมูลดูแลด้วยตัวนับ revision: ถาม ?ping=1 เป็นระยะ ซึ่งฝั่งเซิร์ฟเวอร์
+//          อ่านแค่ตัวเลขตัวเดียวโดยไม่เปิด Spreadsheet จึงเบามาก และจะโหลด snapshot ใหม่
+//          ก็ต่อเมื่อตัวเลขนั้นเปลี่ยนจริง (แปลว่ามีคนแก้ข้อมูลจากเครื่องอื่น)
+//
+//          snapshot ล่าสุดถูกเก็บไว้ใน localStorage ด้วย เปิดแอปครั้งต่อไปจึงเห็นข้อมูล
+//          ทันทีตั้งแต่วินาทีแรก แล้วค่อยอัปเดตให้สดอยู่เบื้องหลัง
+// ===========================================================================
 
-const state={user:null,master:[],statuses:[],priorities:[],categories:[],activityTypes:[],customers:[],users:[],mine:true,sla:{warn:7,overdue:15}};
-const $=s=>document.querySelector(s), esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const date=v=>v?new Intl.DateTimeFormat('th-TH',{dateStyle:'medium'}).format(new Date(v)): '-';
-const dt=v=>v?new Intl.DateTimeFormat('th-TH',{dateStyle:'short',timeStyle:'short'}).format(new Date(v)): '-';
-const statusClass=s=>'status-'+String(s).replace(/\s|\//g,'-');
-const TOKEN_KEY='pts_token',NAME_KEY='pts_name';
-const token=()=>{try{return localStorage.getItem(TOKEN_KEY)||''}catch(e){return ''}};
-const setAuth=(t,n)=>{try{localStorage.setItem(TOKEN_KEY,t);localStorage.setItem(NAME_KEY,n)}catch(e){}};
-const clearAuth=()=>{try{localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(NAME_KEY)}catch(e){}};
-async function call(action,data){
-  if(!window.API_URL)return{success:false,message:'ยังไม่ได้ตั้งค่า API_URL ในไฟล์ config.js'};
-  try{
-    const res=await fetch(window.API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:action,data:data===undefined?null:data,token:token()})});
-    const out=await res.json();
-    if(out&&out.authError){clearAuth();loginScreen(out.message);return{success:false,message:out.message,handled:true}}
+/* ---------------------------------------------------------------------------
+ * 1. ค่าคงที่ + เครื่องมือช่วย
+ * ------------------------------------------------------------------------- */
+const TOKEN_KEY = 'pts_token', NAME_KEY = 'pts_name', SNAP_KEY = 'pts_snapshot_v2';
+
+const SYNC_FAST_MS = 5000;      // ช่วงที่เพิ่งมีการใช้งาน
+const SYNC_SLOW_MS = 15000;     // เงียบไปสักพัก
+const SYNC_IDLE_MS = 45000;     // เปิดทิ้งไว้ทั้งวัน
+const SYNC_SAFETY_MS = 180000;  // โหลดใหม่ทั้งก้อนทุก 3 นาที เผื่อตัวนับเพี้ยน
+const POST_TIMEOUT_MS = 40000;  // อัปโหลดไฟล์ใช้เวลานาน
+const PING_TIMEOUT_MS = 8000;
+const CACHE_MAX_CHARS = 3000000;
+
+const $ = s => document.querySelector(s);
+const esc = v => String(v == null ? '' : v).replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
+const pad2 = n => String(n).padStart(2, '0');
+
+/** ตัดค่าวันที่ให้เหลือ yyyy-MM-dd ไม่ว่าจะรับมาเป็นข้อความหรือ Date */
+function dOnly(value) {
+  if (!value) return '';
+  const text = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
+  const d = new Date(text);
+  return isNaN(d.getTime()) ? '' : d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+const todayStr = () => dOnly(new Date());
+function daysBetween(from, to) {
+  const a = dOnly(from), b = dOnly(to);
+  if (!a || !b) return null;
+  return Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 86400000);
+}
+const daysSince = v => daysBetween(v, new Date());
+
+const fmtDate = v => { const d = dOnly(v); return d ? new Intl.DateTimeFormat('th-TH', { dateStyle: 'medium' }).format(new Date(d + 'T00:00:00')) : '-'; };
+const fmtDateTime = v => { if (!v) return '-'; const d = new Date(v); return isNaN(d.getTime()) ? '-' : new Intl.DateTimeFormat('th-TH', { dateStyle: 'short', timeStyle: 'short' }).format(d); };
+const fmtMoney = v => { const n = Number(String(v).replace(/,/g, '')); return isFinite(n) && String(v).trim() !== '' ? new Intl.NumberFormat('th-TH').format(n) : '-'; };
+const nowLocalInput = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+
+const svg = body => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + body + '</svg>';
+const I = {
+  dash: svg('<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>'),
+  list: svg('<line x1="9" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="9" y1="18" x2="21" y2="18"/><circle cx="4.5" cy="6" r="1.2"/><circle cx="4.5" cy="12" r="1.2"/><circle cx="4.5" cy="18" r="1.2"/>'),
+  plus: svg('<circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>'),
+  users: svg('<path d="M17 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9.5" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/>'),
+  back: svg('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
+  refresh: svg('<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>'),
+  logout: svg('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>'),
+  trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
+  clip: svg('<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>'),
+  edit: svg('<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/>'),
+  note: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
+  swap: svg('<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>'),
+  ban: svg('<circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/>'),
+  close: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  ext: svg('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>')
+};
+
+/* ---------------------------------------------------------------------------
+ * 2. ข้อมูลในเครื่อง — ทุกหน้าจอวาดจากตรงนี้ ไม่ใช่จากคำขอใหม่
+ * ------------------------------------------------------------------------- */
+const S = {
+  ready: false,
+  view: { name: 'dashboard', params: {} },
+  user: null,
+  mine: true,
+  rev: null,
+  lastSyncAt: null,
+  lastError: null,
+  syncing: false,
+
+  customers: [], opportunities: [], activities: [], attachments: [],
+  owners: [], workTypes: [], closeReasons: [],
+  statuses: [], closedStatus: [], pendingQuoteStatus: [],
+  priorities: [], categories: [], activityTypes: [],
+  wonStatus: '', voidStatus: '', quoteSentStatus: '',
+  sla: { warn: 7, overdue: 15 },
+
+  filter: { query: '', status: '', owner: '', priority: '' },
+  customerQuery: '',
+
+  repaintPending: false,
+  rows: [],
+  byId: new Map(),
+  actsBy: new Map(),
+  filesBy: new Map(),
+  signature: null
+};
+
+const token = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } };
+const setAuth = (t, n) => { try { localStorage.setItem(TOKEN_KEY, t); localStorage.setItem(NAME_KEY, n); } catch (e) {} };
+const clearAuth = () => { try { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(NAME_KEY); localStorage.removeItem(SNAP_KEY); } catch (e) {} };
+const myName = () => (S.user && (S.user.Name || S.user.Email)) || '';
+const isClosed = s => S.closedStatus.indexOf(s) !== -1;
+const isPendingQuote = s => S.pendingQuoteStatus.indexOf(s) !== -1;
+
+const STATUS_TONE = {
+  'ขอใบเสนอราคา': 'blue',
+  'ต้องเข้าสำรวจหน้างาน': 'amber',
+  'สำรวจหน้างานแล้ว': 'indigo',
+  'ต้องขอข้อมูลเพิ่มเติม': 'orange',
+  'ระหว่างจัดทำใบเสนอราคา': 'violet',
+  'ส่งใบเสนอราคาแล้ว': 'cyan',
+  'อนุมัติ/ได้งาน': 'green',
+  'ไม่อนุมัติ/ไม่ได้งาน': 'red'
+};
+const tone = status => STATUS_TONE[String(status).trim()] || 'slate';
+
+/**
+ * สร้างดัชนีใหม่หลังข้อมูลเปลี่ยน
+ *
+ * งานที่เคยให้เซิร์ฟเวอร์ทำ (ต่อข้อมูลลูกค้าเข้ากับงานขาย, นับอายุใบเสนอราคา,
+ * จัดกลุ่มกิจกรรม/ไฟล์แนบตามงาน) ย้ายมาทำที่นี่ครั้งเดียว
+ * แล้วทุกหน้าจอก็หยิบไปใช้ได้ทันทีโดยไม่ต้องคำนวณซ้ำ
+ */
+function reindex() {
+  const custById = new Map(S.customers.map(c => [c.Customer_ID, c]));
+  S.rows = S.opportunities.map(o => Object.assign({}, o, {
+    Customer: custById.get(o.Customer_ID) || {},
+    Quote_Age_Days: isPendingQuote(o.Status) ? daysSince(o.Request_Date) : null
+  }));
+  S.byId = new Map(S.rows.map(o => [o.Opportunity_ID, o]));
+
+  S.actsBy = new Map();
+  S.activities.forEach(a => {
+    const list = S.actsBy.get(a.Opportunity_ID) || [];
+    list.push(a);
+    S.actsBy.set(a.Opportunity_ID, list);
+  });
+
+  S.filesBy = new Map();
+  S.attachments.forEach(a => {
+    const list = S.filesBy.get(a.Opportunity_ID) || [];
+    list.push(a);
+    S.filesBy.set(a.Opportunity_ID, list);
+  });
+}
+
+/** ลายเซ็นของข้อมูลปัจจุบัน ใช้เทียบว่า snapshot ที่เพิ่งได้มาต่างจากที่มีอยู่จริงไหม */
+function computeSignature() {
+  return JSON.stringify([S.opportunities, S.customers, S.activities, S.attachments]);
+}
+
+/** วาง snapshot ที่ได้มาลงในเครื่อง คืนค่า true ถ้าข้อมูลต่างจากเดิมจริง */
+function applySnapshot(data) {
+  if (!data) return false;
+  S.user = data.user || S.user;
+  S.rev = typeof data.rev === 'undefined' ? S.rev : data.rev;
+  ['customers', 'opportunities', 'activities', 'attachments', 'owners', 'workTypes', 'closeReasons',
+    'statuses', 'closedStatus', 'pendingQuoteStatus', 'priorities', 'categories', 'activityTypes'
+  ].forEach(k => { if (Array.isArray(data[k])) S[k] = data[k]; });
+  ['wonStatus', 'voidStatus', 'quoteSentStatus'].forEach(k => { if (data[k]) S[k] = data[k]; });
+  if (data.sla) S.sla = data.sla;
+
+  const signature = computeSignature();
+  const changed = signature !== S.signature;
+  S.signature = signature;
+
+  reindex();
+  return changed;
+}
+
+function snapshotForCache() {
+  return {
+    rev: S.rev, user: S.user,
+    customers: S.customers, opportunities: S.opportunities, activities: S.activities, attachments: S.attachments,
+    owners: S.owners, workTypes: S.workTypes, closeReasons: S.closeReasons,
+    statuses: S.statuses, closedStatus: S.closedStatus, pendingQuoteStatus: S.pendingQuoteStatus,
+    priorities: S.priorities, categories: S.categories, activityTypes: S.activityTypes,
+    wonStatus: S.wonStatus, voidStatus: S.voidStatus, quoteSentStatus: S.quoteSentStatus, sla: S.sla
+  };
+}
+
+/** เก็บ snapshot ไว้ในเครื่อง เพื่อให้เปิดแอปครั้งหน้าเห็นข้อมูลทันทีโดยไม่ต้องรอเน็ต */
+function saveCache() {
+  try {
+    const text = JSON.stringify(snapshotForCache());
+    if (text.length > CACHE_MAX_CHARS) return;   // ใหญ่เกินไป ปล่อยให้โหลดใหม่ดีกว่า
+    localStorage.setItem(SNAP_KEY, text);
+  } catch (e) { /* โหมดส่วนตัว หรือพื้นที่เต็ม — ไม่ใช่เรื่องคอขาดบาดตาย */ }
+}
+
+function readCache() {
+  try {
+    const text = localStorage.getItem(SNAP_KEY);
+    return text ? JSON.parse(text) : null;
+  } catch (e) { return null; }
+}
+
+/* ---------------------------------------------------------------------------
+ * 3. การคุยกับเซิร์ฟเวอร์
+ *
+ * เขียนข้อมูล/ดึง snapshot -> POST (token อยู่ใน body ไม่ติดไปกับ URL)
+ * เช็คว่ามีอะไรเปลี่ยนไหม   -> GET ?ping=1 ตอบแค่ตัวเลข ไม่ต้องใช้ token
+ * ------------------------------------------------------------------------- */
+function withTimeout(url, options, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, Object.assign({}, options, { signal: ctrl.signal })).finally(() => clearTimeout(timer));
+}
+
+async function post(action, data) {
+  if (!window.API_URL) return { success: false, message: 'ยังไม่ได้ตั้งค่า API_URL ในไฟล์ config.js' };
+  try {
+    const res = await withTimeout(window.API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: action, data: data === undefined ? null : data, token: token() }),
+      redirect: 'follow'
+    }, POST_TIMEOUT_MS);
+    const out = JSON.parse(await res.text());
+    if (out && out.authError) { clearAuth(); renderLogin(out.message); return { success: false, message: out.message, handled: true }; }
+    if (out && typeof out.rev !== 'undefined') S.rev = out.rev;
     return out;
-  }catch(err){return{success:false,message:'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่'}}
-}
-function toast(message,ok=false){const x=$('#toast');x.textContent=message;x.className=`fixed right-4 top-4 z-50 rounded-xl px-4 py-3 text-sm shadow-lg ${ok?'bg-emerald-600 text-white':'bg-rose-600 text-white'}`;x.classList.remove('hidden');setTimeout(()=>x.classList.add('hidden'),3200)}
-const nowLocal=()=>{const d=new Date();d.setMinutes(d.getMinutes()-d.getTimezoneOffset());return d.toISOString().slice(0,16)};
-const myName=()=>state.user?.Name||state.user?.Email||'';
-function lockForm(e,on,text){const b=e.target.querySelector('button:not([type="button"])');if(!b)return;if(on){if(!b.dataset.label)b.dataset.label=b.textContent;b.textContent=text||'กำลังบันทึก…';b.disabled=true;b.classList.add('opacity-60')}else{b.textContent=b.dataset.label||b.textContent;b.disabled=false;b.classList.remove('opacity-60')}}
-function loading(){ $('#app').innerHTML='<div class="p-8 text-center text-slate-500">กำลังโหลด…</div>'; }
-function nav(active){$('#nav').innerHTML=[['dashboard','⌂','Dashboard'],['opportunities','▤','งานขาย'],['rfq','＋','RFQ'],['customers','♙','ลูกค้า']].map(n=>`<button onclick="route('${n[0]}')" class="min-w-16 text-xs ${active===n[0]?'font-bold text-teal-700':'text-slate-500'}"><span class="block text-xl">${n[1]}</span>${n[2]}</button>`).join('')}
-let LOGIN_PW='';
-function loginScreen(message,names){
-  $('#nav').innerHTML='';
-  $('#app').innerHTML=`<div class="flex min-h-screen items-center justify-center p-5"><form class="card w-full max-w-sm space-y-4" onsubmit="submitLogin(event)"><div class="text-center"><img src="logo-full.jpg" alt="PAKORN Technical Supply" class="mx-auto h-28 w-auto"><h1 class="mt-4 text-2xl font-bold text-teal-800">PTS Sales</h1><p class="mt-1 text-sm text-slate-500">ระบบติดตามงานขาย</p></div>${message?`<p class="rounded-lg bg-rose-50 p-2 text-center text-sm text-rose-700">${esc(message)}</p>`:''}${names?`<label><span class="label">คุณคือใคร *</span><select name="name" class="field" required><option value="">เลือกชื่อของคุณ</option>${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select></label>`:`<label><span class="label">รหัสผ่านของทีม *</span><input name="password" type="password" class="field" required autocomplete="current-password" autofocus></label>`}<button class="btn btn-primary w-full">${names?'เข้าใช้งาน':'ถัดไป'}</button><p class="text-center text-xs text-slate-400">ระบบจะจำอุปกรณ์นี้ไว้ 30 วัน</p></form></div>`;
-}
-async function submitLogin(e){
-  e.preventDefault();lockForm(e,true,'กำลังตรวจสอบ…');
-  const f=Object.fromEntries(new FormData(e.target));
-  if(f.password!==undefined)LOGIN_PW=f.password;
-  const r=await call('login',{password:LOGIN_PW,name:f.name||''});
-  if(!r.success){LOGIN_PW='';return loginScreen(r.message)}
-  if(r.data&&r.data.needName)return loginScreen('',r.data.names);
-  setAuth(r.data.token,r.data.name);LOGIN_PW='';start();
-}
-function logout(){if(!confirm('ออกจากระบบ?'))return;clearAuth();location.reload()}
-async function start(){
-  if(!token())return loginScreen();
-  loading();
-  const r=await call('getInitialData');
-  if(!r.success){if(r.handled)return;$('#app').innerHTML=`<div class="m-5 card text-rose-700"><h1 class="font-bold">เข้าใช้งานไม่ได้</h1><p class="mt-2">${esc(r.message)}</p><button class="btn btn-secondary mt-3" onclick="logout()">ลองเข้าสู่ระบบใหม่</button></div>`;return}
-  Object.assign(state,r.data);route('dashboard');
-}
-async function loadCustomers(){const r=await call('listCustomers','');if(r.success)state.customers=r.data}
-async function loadUsers(){const r=await call('listUsers');if(r.success)state.users=r.data}
-function route(name){if(name==='dashboard')dashboard();if(name==='opportunities')opportunities({owner:state.mine?myName():''});if(name==='rfq')rfqForm();if(name==='customers')customers()}
-const pageTop=(title,sub='')=>`<header class="app-header flex items-center justify-between bg-teal-800 px-4 text-white"><div class="flex items-center gap-3"><img src="logo-mark.png" alt="" class="logo-tile h-9 w-9 shrink-0 object-contain"><div><h1 class="text-xl font-bold">${title}</h1>${sub?`<p class="text-xs text-teal-100">${sub}</p>`:''}</div></div><button onclick="logout()" class="text-right text-xs leading-tight">${esc(state.user?.Name||state.user?.Email||'')}<span class="block text-teal-200 underline">ออกจากระบบ</span></button></header>`;
-function ageBadge(o){const n=o.Quote_Age_Days;if(n===null||n===undefined||n==='')return '';const w=state.sla?.warn??7,c=state.sla?.overdue??15;if(n<w)return '';return `<span class="badge ${n>=c?'bg-rose-100 text-rose-700':'bg-amber-100 text-amber-700'}">รอเสนอราคา ${n} วัน</span>`}
-function cardOpp(o){return `<button onclick="detail('${esc(o.Opportunity_ID)}')" class="card w-full text-left"><div class="flex justify-between gap-2"><strong>${esc(o.Project_Name)}</strong><span class="flex shrink-0 flex-col items-end gap-1"><span class="badge ${statusClass(o.Status)}">${esc(o.Status)}</span>${ageBadge(o)}</span></div><div class="mt-1 text-sm text-slate-600">${esc(o.Customer?.Company_Name||'')} · ${esc(o.Opportunity_ID)}</div><div class="mt-2 text-xs text-slate-500">ผู้รับผิดชอบ ${esc(o.Owner)} · ติดตาม ${date(o.Next_Action_Date)} · ครบกำหนด ${date(o.Due_Date)}</div></button>`}
-async function dashboard(){loading();nav('dashboard');const owner=state.mine?myName():'';const r=await call('dashboardData',owner);if(!r.success)return toast(r.message);const d=r.data;$('#app').innerHTML=pageTop('PTS Sales','ภาพรวมงานขาย')+`<section class="space-y-5 p-4"><div class="flex gap-2"><button onclick="setScope(true)" class="btn flex-1 ${state.mine?'btn-primary':'btn-secondary'}">งานของฉัน</button><button onclick="setScope(false)" class="btn flex-1 ${state.mine?'btn-secondary':'btn-primary'}">ทั้งทีม</button></div><div class="grid grid-cols-2 gap-3 sm:grid-cols-3">${Object.entries(d.counts).map(([k,v])=>`<button onclick="opportunities({status:'${esc(k)}',owner:'${esc(owner)}'})" class="card text-left"><div class="text-2xl font-bold text-teal-700">${v}</div><div class="mt-1 text-xs text-slate-600">${esc(k)}</div></button>`).join('')}</div>${quoteKpi(d.kpi)}${workList('เกินกำหนดเสนอราคา '+((d.kpi&&d.kpi.slaOverdueDays)||15)+' วัน',d.quoteOverdue||[],'ไม่มีงานเกินกำหนดเสนอราคา',true)}${workList('ใกล้ครบกำหนดเสนอราคา '+((d.kpi&&d.kpi.slaWarnDays)||7)+' วัน',d.quoteWarn||[],'ไม่มีงานใกล้ครบกำหนด','warn')}${workList('เลยวันติดตาม',d.followUpOverdue||[],'ไม่มีงานค้างติดตาม',true)}${workList('งานที่ต้องทำวันนี้',d.today,'ไม่มีงานติดตามวันนี้')}${workList('งานเกินกำหนดส่ง',d.overdue,'ไม่มีงานเกินกำหนด')}</section>`}
-function quoteKpi(k){if(!k)return '';const rate=k.onTimeRate==null?'—':k.onTimeRate+'%';const avg=k.avgLeadDays==null?'—':k.avgLeadDays+' วัน';const tone=k.onTimeRate==null?'text-slate-400':k.onTimeRate>=80?'text-emerald-600':k.onTimeRate>=60?'text-amber-600':'text-rose-600';return `<section class="card"><h2 class="font-bold">KPI การเสนอราคา</h2><p class="mt-1 text-xs text-slate-500">นับจากวันที่ลูกค้าขอราคา ถึงวันที่ส่งใบเสนอราคา · เป้าหมายภายใน ${k.slaWarnDays} วัน</p><div class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4"><div><div class="text-2xl font-bold ${tone}">${rate}</div><div class="text-xs text-slate-600">เสนอราคาทันเป้า</div></div><div><div class="text-2xl font-bold text-slate-700">${avg}</div><div class="text-xs text-slate-600">เฉลี่ยที่ใช้จริง</div></div><div><div class="text-2xl font-bold text-amber-600">${k.quoteWarn}</div><div class="text-xs text-slate-600">เกิน ${k.slaWarnDays} วัน</div></div><div><div class="text-2xl font-bold text-rose-600">${k.quoteOverdue}</div><div class="text-xs text-slate-600">เกิน ${k.slaOverdueDays} วัน</div></div></div><p class="mt-3 text-xs text-slate-400">${k.quotedCount?'คำนวณจากงานที่ส่งใบเสนอราคาแล้ว '+k.quotedCount+' งาน · ยังรอเสนอราคาอีก '+k.pendingQuote+' งาน':'ยังไม่มีงานที่บันทึกวันส่งใบเสนอราคา — ระบบจะเริ่มนับให้อัตโนมัติเมื่อเปลี่ยนสถานะเป็น “ส่งใบเสนอราคาแล้ว”'}</p></section>`}
-function setScope(mine){state.mine=mine;dashboard()}
-function workList(title,items,empty,tone){const warn=tone==='warn',danger=tone===true||tone==='danger';return `<section><h2 class="mb-2 flex items-center gap-2 font-bold ${items.length?(danger?'text-rose-600':warn?'text-amber-600':''):''}">${title}${items.length?`<span class="badge ${danger?'bg-rose-100 text-rose-700':warn?'bg-amber-100 text-amber-700':'bg-slate-200 text-slate-600'}">${items.length}</span>`:''}</h2><div class="space-y-2">${items.length?items.map(cardOpp).join(''):`<div class="card text-sm text-slate-500">${empty}</div>`}</div></section>`}
-async function opportunities(filter={}){loading();nav('opportunities');const r=await call('listOpportunities',filter);if(!r.success)return toast(r.message);renderOppList(r.data,filter)}
-function renderOppList(rows,filter){$('#app').innerHTML=pageTop('งานขาย',`${rows.length} รายการ`)+`<section class="space-y-3 p-4"><div class="flex gap-2"><input id="search" value="${esc(filter.query||'')}" class="field" placeholder="ค้นหา งาน / บริษัท / โทร / QT" onkeydown="if(event.key==='Enter'){event.preventDefault();searchOpp()}"><button class="btn btn-primary" onclick="searchOpp()">ค้นหา</button></div><div class="grid grid-cols-3 gap-2"><select id="fstatus" class="field text-xs"><option value="">ทุกสถานะ</option>${state.statuses.map(s=>`<option ${filter.status===s?'selected':''}>${esc(s)}</option>`).join('')}</select><select id="fowner" class="field text-xs"><option value="">ทุกผู้รับผิดชอบ</option>${owners().map(s=>`<option ${filter.owner===s?'selected':''}>${esc(s)}</option>`).join('')}</select><select id="fpriority" class="field text-xs"><option value="">ทุกความสำคัญ</option>${state.priorities.map(s=>`<option ${filter.priority===s?'selected':''}>${s}</option>`).join('')}</select></div><div class="space-y-2">${rows.length?rows.map(cardOpp).join(''):'<div class="card text-center text-slate-500">ไม่พบงานขาย</div>'}</div></section>`}
-function searchOpp(){opportunities({query:$('#search').value,status:$('#fstatus').value,owner:$('#fowner').value,priority:$('#fpriority').value})}
-function owners(){return [...new Set(state.users.map(x=>x.Name||x.Email).filter(Boolean))]}
-function customerOptions(selected=''){return `<option value="">เลือกลูกค้า</option>${state.customers.map(c=>`<option value="${esc(c.Customer_ID)}" ${selected===c.Customer_ID?'selected':''}>${esc(c.Company_Name)}${c.Contact_Name?' — '+esc(c.Contact_Name):''}</option>`).join('')}`}
-function select(name,label,options,value='',required=false){return `<label><span class="label">${label}${required?' *':''}</span><select name="${name}" class="field" ${required?'required':''}>${options.map(x=>`<option value="${esc(x)}" ${x===value?'selected':''}>${esc(x)}</option>`).join('')}</select></label>`}
-function rfqForm(o={}){nav('rfq');const workTypes=state.master.filter(x=>x.Type==='Work_Type').map(x=>x.Name);$('#app').innerHTML=pageTop(o.Opportunity_ID?'แก้ไขงานขาย':'+ ขอใบเสนอราคา')+`<form class="space-y-4 p-4" onsubmit="saveOpp(event,'${esc(o.Opportunity_ID||'')}')"><div class="card space-y-3"><h2 class="font-bold">ข้อมูลหลัก</h2><label><span class="label">ลูกค้า *</span><select name="Customer_ID" class="field" required>${customerOptions(o.Customer_ID)}</select></label>${input('Project_Name','ชื่อโครงการ',o.Project_Name,'text',true)}${input('Site_Location','สถานที่หน้างาน',o.Site_Location)}${select('Work_Type','ประเภทงาน',[''].concat(workTypes),o.Work_Type)}<label><span class="label">รายละเอียด</span><textarea name="Description" class="field" rows="3">${esc(o.Description)}</textarea></label></div><div class="card grid grid-cols-1 gap-3 sm:grid-cols-2">${select('Priority','ความสำคัญ',state.priorities,o.Priority||'Normal')}${input('Due_Date','ครบกำหนด',''+(o.Due_Date||''),'date')}${select('Owner','ผู้รับผิดชอบ',[''].concat(owners()),o.Owner,true)}${input('Estimated_Value','มูลค่าคาดการณ์',o.Estimated_Value,'number')} ${input('Quotation_No','เลขที่ใบเสนอราคา',o.Quotation_No)}${input('Quotation_Amount','มูลค่าใบเสนอราคา',o.Quotation_Amount,'number')}</div><div class="card space-y-3"><h2 class="font-bold">ติดตามงาน</h2>${input('Next_Action','Next Action',o.Next_Action,'text',true)}${input('Next_Action_Date','วันที่ติดตาม',o.Next_Action_Date,'date',true)}<label><span class="label">หมายเหตุ</span><textarea name="Remark" class="field" rows="2">${esc(o.Remark)}</textarea></label></div><button class="btn btn-primary w-full">บันทึก</button></form>`}
-async function saveOpp(e,id){e.preventDefault();lockForm(e,true);const raw=Object.fromEntries(new FormData(e.target));if(id)raw.Opportunity_ID=id;const r=await call('saveOpportunity',raw);if(!r.success){lockForm(e,false);return toast(r.message)}toast(r.message,true);detail(r.data.Opportunity_ID||id)}
-async function detail(id){loading();nav('opportunities');const r=await call('getOpportunity',id);if(!r.success)return toast(r.message);const d=r.data,o=d.opportunity,c=d.customer;$('#app').innerHTML=pageTop(o.Opportunity_ID,'รายละเอียดงานขาย')+`<section class="space-y-4 p-4"><div class="card"><div class="flex justify-between gap-3"><div><h2 class="text-lg font-bold">${esc(o.Project_Name)}</h2><p class="text-sm text-slate-600">${esc(c.Company_Name)}</p></div><span class="badge ${statusClass(o.Status)}">${esc(o.Status)}</span></div><div class="mt-4 grid grid-cols-2 gap-2 text-sm"><p><b>ผู้ขอราคา:</b> ${esc(o.Requester_Name||c.Contact_Name||'-')}</p><p><b>แผนก:</b> ${esc(o.Requester_Department||c.Department||'-')}</p><p><b>โทร:</b> ${esc(o.Requester_Phone||c.Phone||'-')}</p><p><b>ผู้รับผิดชอบ:</b> ${esc(o.Owner)}</p><p><b>ครบกำหนด:</b> ${date(o.Due_Date)}</p><p><b>Next Action:</b> ${esc(o.Next_Action||'-')}</p></div><div class="mt-4 grid grid-cols-2 gap-2"><button class="btn btn-secondary" onclick="editOpp('${esc(o.Opportunity_ID)}')">แก้ไข</button><button class="btn btn-primary" onclick="statusForm('${esc(o.Opportunity_ID)}','${esc(o.Status)}')">เปลี่ยนสถานะ</button>${o.Status!==voidStatus()?`<button class="btn col-span-2 bg-rose-50 text-rose-700" onclick="voidForm('${esc(o.Opportunity_ID)}')">ยกเลิกงาน</button>`:''}</div></div><div class="card text-sm"><p><b>สถานที่:</b> ${esc(o.Site_Location||'-')}</p><p class="mt-2"><b>รายละเอียด:</b> ${esc(o.Description||'-')}</p><p class="mt-2"><b>ใบเสนอราคา:</b> ${esc(o.Quotation_No||'-')} / ${esc(o.Quotation_Amount||'-')}</p></div><div class="grid grid-cols-2 gap-2"><button class="btn btn-secondary" onclick="activityForm('${esc(o.Opportunity_ID)}')">+ Activity</button><button class="btn btn-secondary" onclick="uploadForm('${esc(o.Opportunity_ID)}')">แนบไฟล์</button></div>${timeline(d.activities)}${attachments(d.attachments)}</section>`}
-async function editOpp(id){const r=await call('getOpportunity',id);if(r.success)rfqForm(r.data.opportunity);else toast(r.message)}
-function timeline(items){return `<section><h2 class="mb-2 font-bold">Timeline</h2><div class="space-y-2">${items.length?items.map(a=>`<div class="card"><div class="flex justify-between gap-2"><b>${esc(a.Activity_Type)}</b><span class="text-xs text-slate-500">${dt(a.Activity_Date)}</span></div><p class="mt-1 text-sm">${esc(a.Description)}</p></div>`).join(''):'<div class="card text-sm text-slate-500">ยังไม่มีกิจกรรม</div>'}</div></section>`}
-function attachments(items){return `<section><h2 class="mb-2 font-bold">ไฟล์แนบ</h2><div class="space-y-2">${items.length?items.map(a=>`<div class="card flex items-center gap-2 text-sm"><a target="_blank" rel="noopener" href="${esc(a.Drive_URL)}" class="flex min-w-0 flex-1 justify-between gap-2"><span class="truncate">${esc(a.File_Name)}</span><span class="shrink-0 text-slate-500">${esc(a.Category)} ↗</span></a><button title="ลบไฟล์" onclick="removeFile('${esc(a.Attachment_ID)}','${esc(a.Opportunity_ID)}')" class="shrink-0 px-2 text-rose-600">✕</button></div>`).join(''):'<div class="card text-sm text-slate-500">ยังไม่มีไฟล์แนบ</div>'}</div></section>`}
-function modal(html){document.body.insertAdjacentHTML('beforeend',`<div id="modal" class="modal fixed inset-0 z-40 flex items-end justify-center p-3 sm:items-center"><div class="max-h-[92vh] w-full max-w-lg overflow-auto rounded-2xl bg-white p-5">${html}</div></div>`)}function closeModal(){$('#modal')?.remove()}
-function statusForm(id,current){const reasons=state.master.filter(x=>x.Type==='Close_Reason').map(x=>x.Name);modal(`<form class="space-y-3" onsubmit="submitStatus(event,'${esc(id)}')"><div class="flex justify-between"><h2 class="text-lg font-bold">เปลี่ยนสถานะ</h2><button type="button" onclick="closeModal()">✕</button></div>${select('Status','สถานะ',state.statuses,current,true)}${input('Quotation_Amount','Winning Amount','', 'number')}<label><span class="label">เหตุผลปิดงาน</span><select name="Close_Reason" class="field"><option value="">เลือกเหตุผล</option>${reasons.map(x=>`<option>${esc(x)}</option>`).join('')}</select></label><label><span class="label">หมายเหตุ</span><textarea name="Remark" class="field"></textarea></label><button class="btn btn-primary w-full">ยืนยัน</button></form>`)}
-async function submitStatus(e,id){e.preventDefault();lockForm(e,true);const r=await call('changeStatus',Object.assign({Opportunity_ID:id},Object.fromEntries(new FormData(e.target))));if(!r.success){lockForm(e,false);return toast(r.message)}closeModal();toast(r.message,true);detail(id)}
-function activityForm(id){modal(`<form class="space-y-3" onsubmit="submitActivity(event,'${esc(id)}')"><div class="flex justify-between"><h2 class="text-lg font-bold">เพิ่ม Activity</h2><button type="button" onclick="closeModal()">✕</button></div>${select('Activity_Type','ประเภท',state.activityTypes,'Note',true)}<label><span class="label">รายละเอียด *</span><textarea name="Description" required class="field" rows="3"></textarea></label>${input('Activity_Date','วันที่/เวลา',nowLocal(),'datetime-local')}${input('Next_Action','Next Action')}${input('Next_Action_Date','วันติดตาม','', 'date')}<div class="rounded-xl border border-dashed border-slate-300 p-3"><p class="label">แนบรูป/เอกสารไปพร้อมกัน (ไม่บังคับ)</p>${select('Category','ประเภทไฟล์',state.categories,'Survey')}<label class="mt-2 block"><span class="label">เลือกไฟล์ (ไฟล์ละไม่เกิน 10 MB)</span><input name="files" type="file" multiple class="field"></label><label class="mt-2 block"><span class="label">หรือถ่ายรูปหน้างาน</span><input name="photos" type="file" accept="image/*" capture="environment" multiple class="field"></label></div><button class="btn btn-primary w-full">บันทึก</button></form>`)}
-async function submitActivity(e,id){
-  e.preventDefault();
-  const form=e.target;
-  const picked=[...form.files.files,...form.photos.files];
-  if(picked.length>10)return toast('แนบได้ครั้งละไม่เกิน 10 ไฟล์');
-  if(picked.some(x=>x.size>10*1024*1024))return toast('มีไฟล์ขนาดเกิน 10 MB');
-  lockForm(e,true);
-  const raw=Object.fromEntries(new FormData(form));
-  delete raw.files;delete raw.photos;delete raw.Category;
-  const r=await call('addActivity',Object.assign({Opportunity_ID:id},raw));
-  if(!r.success){lockForm(e,false);return toast(r.message)}
-  if(picked.length){
-    lockForm(e,true,'กำลังอัปโหลดไฟล์…');
-    const up=await call('uploadFiles',{Opportunity_ID:id,Category:form.Category.value||'Photo',files:await readFiles(picked)});
-    if(!up.success){closeModal();toast('บันทึกกิจกรรมแล้ว แต่แนบไฟล์ไม่สำเร็จ: '+up.message);return detail(id)}
+  } catch (err) {
+    const timedOut = err && err.name === 'AbortError';
+    return { success: false, message: timedOut ? 'เซิร์ฟเวอร์ตอบช้าผิดปกติ ลองใหม่อีกครั้ง' : 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่' };
   }
-  closeModal();toast(r.message,true);detail(id);
 }
-const readFiles=list=>Promise.all(list.map(x=>new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve({name:x.name,mimeType:x.type,base64:r.result});r.onerror=reject;r.readAsDataURL(x)})));
-function uploadForm(id){modal(`<form class="space-y-3" onsubmit="submitFiles(event,'${esc(id)}')"><div class="flex justify-between"><h2 class="text-lg font-bold">แนบไฟล์</h2><button type="button" onclick="closeModal()">✕</button></div>${select('Category','ประเภทไฟล์',state.categories,'RFQ',true)}<label><span class="label">เลือกไฟล์ (ไฟล์ละไม่เกิน 10 MB)</span><input name="files" type="file" multiple class="field"></label><label><span class="label">หรือถ่ายรูปหน้างาน</span><input name="photos" type="file" accept="image/*" capture="environment" multiple class="field"></label><button class="btn btn-primary w-full">อัปโหลด</button></form>`)}
-async function submitFiles(e,id){e.preventDefault();const f=[...e.target.files.files,...e.target.photos.files];if(!f.length)return toast('กรุณาเลือกไฟล์หรือถ่ายรูปอย่างน้อย 1 ไฟล์');if(f.length>10)return toast('อัปโหลดได้ครั้งละไม่เกิน 10 ไฟล์');if(f.some(x=>x.size>10*1024*1024))return toast('มีไฟล์ขนาดเกิน 10 MB');lockForm(e,true,'กำลังอัปโหลด…');const files=await readFiles(f);const r=await call('uploadFiles',{Opportunity_ID:id,Category:e.target.Category.value,files});if(!r.success){lockForm(e,false);return toast(r.message)}closeModal();toast(r.message,true);detail(id)}
-async function customers(){loading();nav('customers');const r=await call('listCustomers','');if(!r.success)return toast(r.message);state.customers=r.data;$('#app').innerHTML=pageTop('ลูกค้า',`${r.data.length} รายการ`)+`<section class="space-y-3 p-4"><div class="flex justify-between"><button class="btn btn-primary" onclick="customerForm()">+ เพิ่มลูกค้า</button><input id="csearch" oninput="filterCustomers()" class="field w-48" placeholder="ค้นหาบริษัท"></div><div id="customer-list" class="space-y-2">${renderCustomers(r.data)}</div></section>`}
-function renderCustomers(rows){return rows.length?rows.map(c=>`<button onclick="customerForm('${esc(c.Customer_ID)}')" class="card w-full text-left"><b>${esc(c.Company_Name)}</b><p class="mt-1 text-sm text-slate-600">${esc(c.Contact_Name||'-')} · ${esc(c.Phone||'-')}</p></button>`).join(''):'<div class="card text-center text-slate-500">ไม่พบลูกค้า</div>'}
-function filterCustomers(){const q=$('#csearch').value.toLowerCase();$('#customer-list').innerHTML=renderCustomers(state.customers.filter(c=>[c.Company_Name,c.Contact_Name,c.Phone,c.Email].join(' ').toLowerCase().includes(q)))}
-async function customerForm(id=''){let c={};if(id){const r=await call('getCustomer',id);if(!r.success)return toast(r.message);c=r.data||{}}modal(`<form class="space-y-3" onsubmit="saveCustomerForm(event,'${esc(id)}')"><div class="flex justify-between"><h2 class="text-lg font-bold">${id?'แก้ไขลูกค้า':'เพิ่มลูกค้า'}</h2><button type="button" onclick="closeModal()">✕</button></div>${input('Company_Name','บริษัท',c.Company_Name,'text',true)}${input('Contact_Name','ผู้ติดต่อ',c.Contact_Name)}${input('Department','แผนก',c.Department)}${input('Phone','เบอร์โทรศัพท์',c.Phone,'tel')}${input('Email','Email',c.Email,'email')}<label><span class="label">ที่อยู่</span><textarea name="Address" class="field">${esc(c.Address||'')}</textarea></label>${input('Map_URL','Google Maps URL',c.Map_URL,'url')}<label><span class="label">หมายเหตุ</span><textarea name="Remark" class="field">${esc(c.Remark||'')}</textarea></label><button class="btn btn-primary w-full">บันทึก</button></form>`)}
-async function saveCustomerForm(e,id){e.preventDefault();lockForm(e,true);const x=Object.fromEntries(new FormData(e.target));if(id)x.Customer_ID=id;const r=await call('saveCustomer',x);if(!r.success){lockForm(e,false);return toast(r.message)}await loadCustomers();closeModal();toast(r.message,true);customers()}
-const voidStatus=()=>state.voidStatus||'ยกเลิก';
-function voidForm(id){modal(`<form class="space-y-3" onsubmit="submitVoid(event,'${esc(id)}')"><div class="flex justify-between"><h2 class="text-lg font-bold text-rose-700">ยกเลิกงาน</h2><button type="button" onclick="closeModal()">✕</button></div><p class="text-sm text-slate-600">งานจะถูกทำเครื่องหมายว่ายกเลิก ไม่ถูกลบออกจากระบบ และยังค้นหาย้อนหลังได้</p><label><span class="label">เหตุผลที่ยกเลิก *</span><textarea name="Reason" required class="field" rows="3"></textarea></label><button class="btn w-full bg-rose-600 text-white">ยืนยันยกเลิกงาน</button></form>`)}
-async function submitVoid(e,id){e.preventDefault();lockForm(e,true,'กำลังยกเลิก…');const r=await call('voidOpportunity',Object.assign({Opportunity_ID:id},Object.fromEntries(new FormData(e.target))));if(!r.success){lockForm(e,false);return toast(r.message)}closeModal();toast(r.message,true);detail(id)}
-async function removeFile(id,oppId){if(!confirm('ลบไฟล์นี้หรือไม่? ไฟล์จะถูกย้ายไปถังขยะใน Drive'))return;const r=await call('deleteAttachment',id);if(!r.success)return toast(r.message);toast(r.message,true);detail(oppId)}
-start();
-function input(name,label,value='',type='text',required=false){let v=value||'';if(type==='date')v=String(v).slice(0,10);if(type==='datetime-local')v=String(v).slice(0,16);return `<label><span class="label">${label}${required?' *':''}</span><input name="${name}" type="${type}" value="${esc(v)}" class="field" ${required?'required':''}></label>`}
 
+/**
+ * ถามเลข revision ล่าสุด — คืน null ถ้าถามไม่สำเร็จ
+ *
+ * ลอง fetch ก่อนเพราะเร็วที่สุด ถ้าไม่ผ่าน (Safari บนมือถือมีปัญหากับ redirect
+ * ของ Apps Script อยู่บ่อยครั้ง) ค่อยถอยไปใช้ JSONP ซึ่งไม่ติดข้อจำกัด CORS
+ */
+async function pingRev() {
+  if (!window.API_URL) return null;
+  const url = window.API_URL + (window.API_URL.indexOf('?') === -1 ? '?' : '&') + 'ping=1&_ts=' + Date.now();
+  try {
+    const res = await withTimeout(url, { method: 'GET', redirect: 'follow', cache: 'no-store' }, PING_TIMEOUT_MS);
+    const out = JSON.parse(await res.text());
+    if (out && typeof out.rev !== 'undefined') return Number(out.rev);
+  } catch (err) { /* ลองทางสำรองต่อ */ }
+  const viaJsonp = await jsonpPing();
+  return viaJsonp && typeof viaJsonp.rev !== 'undefined' ? Number(viaJsonp.rev) : null;
+}
+
+function jsonpPing() {
+  return new Promise(resolve => {
+    const name = 'pts_cb_' + Math.round(1e9 * Math.random());
+    const script = document.createElement('script');
+    let settled = false, timer = null;
+
+    const done = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { delete window[name]; } catch (e) { window[name] = undefined; }
+      if (script.parentNode) script.parentNode.removeChild(script);
+      resolve(value);
+    };
+
+    window[name] = json => done(json || null);
+    script.src = window.API_URL + (window.API_URL.indexOf('?') === -1 ? '?' : '&') + 'ping=1&callback=' + name + '&_ts=' + Date.now();
+    script.async = true;
+    script.onerror = () => done(null);
+    (document.head || document.documentElement).appendChild(script);
+    timer = setTimeout(() => done(null), PING_TIMEOUT_MS);
+  });
+}
+
+/* ---------------------------------------------------------------------------
+ * 4. ตัวซิงก์เบื้องหลัง
+ *
+ * ยิ่งเงียบยิ่งถามห่างขึ้น เครื่องที่เปิดทิ้งไว้ทั้งวันจะได้ไม่กินโควตา Apps Script
+ * ------------------------------------------------------------------------- */
+let syncTimer = null, quietPolls = 0, lastFullFetch = 0, lastLocalWrite = 0;
+
+function syncInterval() {
+  if (quietPolls < 12) return SYNC_FAST_MS;
+  if (quietPolls < 40) return SYNC_SLOW_MS;
+  return SYNC_IDLE_MS;
+}
+
+function scheduleSync(ms) { clearTimeout(syncTimer); syncTimer = setTimeout(runSyncTick, ms); }
+
+/** ผู้ใช้เพิ่งทำอะไรสักอย่าง — กลับไปถามถี่ๆ อีกครั้ง */
+function markActivity() { quietPolls = 0; scheduleSync(SYNC_FAST_MS); }
+
+async function runSyncTick() {
+  if (!token() || document.hidden) { scheduleSync(syncInterval()); return; }
+  try {
+    const rev = await pingRev();
+    const changed = rev !== null && S.rev !== null && rev !== S.rev;
+    const overdue = Date.now() - lastFullFetch > SYNC_SAFETY_MS;
+
+    // ถ้า ping ใช้ไม่ได้ (เช่นยังไม่ได้ Deploy หลังบ้านเวอร์ชันใหม่) ห้ามถอยไปโหลด
+    // ข้อมูลทั้งก้อนทุกๆ 5 วินาที เพราะจะกินโควตา Apps Script จนหมดวัน
+    // ให้ค่อยๆ ถามห่างออกไป แล้วอาศัยการโหลดรอบใหญ่ตามกำหนดแทน
+    if (changed || overdue) {
+      quietPolls = 0;
+      await refresh({ silent: true });
+    } else if (rev === null) {
+      quietPolls++;
+      S.lastError = null;
+      renderSync();
+    } else {
+      quietPolls++;
+      S.lastError = null;
+      S.lastSyncAt = new Date();
+      renderSync();
+    }
+  } catch (err) { /* ตานี้พลาด ตาหน้าค่อยว่ากัน */ }
+  scheduleSync(syncInterval());
+}
+
+function startSync() {
+  lastFullFetch = Date.now();
+  scheduleSync(SYNC_FAST_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) markActivity(); });
+  window.addEventListener('focus', markActivity);
+  window.addEventListener('online', markActivity);
+}
+
+/** ดึง snapshot ใหม่ทั้งก้อน */
+async function refresh(options) {
+  options = options || {};
+  if (S.syncing) return false;
+  S.syncing = true;
+  renderSync();
+
+  const out = await post('getSnapshot');
+  S.syncing = false;
+  lastFullFetch = Date.now();
+
+  if (!out.success) {
+    if (out.handled) return false;
+    S.lastError = out.message;
+    if (!S.ready) return renderFatal(out.message), false;
+    renderSync();
+    if (!options.silent) toast(out.message);
+    return false;
+  }
+
+  S.lastError = null;
+  S.lastSyncAt = new Date();
+
+  const before = S.opportunities.length;
+  const changed = applySnapshot(out.data);
+  saveCache();
+
+  if (!S.ready) { S.ready = true; render(); return true; }
+  if (!changed) { renderSync(); return true; }
+
+  repaint();
+
+  // แจ้งเฉพาะตอนที่จำนวนงานเปลี่ยนจริง และไม่ใช่ผลจากการบันทึกของเราเอง
+  const diff = S.opportunities.length - before;
+  if (options.silent && diff !== 0 && Date.now() - lastLocalWrite > 8000) {
+    toast(diff > 0 ? 'มีงานขายใหม่ ' + diff + ' รายการจากเครื่องอื่น' : 'มีการลบงานขาย ' + Math.abs(diff) + ' รายการจากเครื่องอื่น', 'info');
+  }
+  return true;
+}
+
+/**
+ * วาดหน้าจอใหม่หลังข้อมูลเปลี่ยนเบื้องหลัง — แต่ต้องไม่ไปทับสิ่งที่ผู้ใช้กำลังทำอยู่
+ *
+ * ถ้ากำลังกรอกฟอร์ม เปิดหน้าต่างซ้อน หรือพิมพ์อยู่ในช่องใดช่องหนึ่ง
+ * จะพักการวาดไว้ก่อน แล้วค่อยวาดตอนที่ผู้ใช้เปลี่ยนหน้าเอง
+ */
+function repaint() {
+  const el = document.activeElement;
+  const typing = el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+  if ($('#modal') || S.view.name === 'rfq' || typing) {
+    S.repaintPending = true;
+    renderSync();
+    return;
+  }
+  S.repaintPending = false;
+  render();
+}
+
+/**
+ * เอาผลลัพธ์ที่เพิ่งบันทึกมาวางในข้อมูลของเครื่องทันที
+ * หน้าจอจึงอัปเดตให้เห็นผลเดี๋ยวนั้น โดยไม่ต้องเสียเวลาโหลด snapshot ใหม่อีกรอบ
+ */
+function applyWrite(out) {
+  const d = (out && out.data) || {};
+  lastLocalWrite = Date.now();
+
+  if (d.opportunity && d.opportunity.Opportunity_ID) {
+    const i = S.opportunities.findIndex(o => o.Opportunity_ID === d.opportunity.Opportunity_ID);
+    if (i === -1) S.opportunities.unshift(d.opportunity); else S.opportunities[i] = Object.assign({}, S.opportunities[i], d.opportunity);
+    const owner = String(d.opportunity.Owner || '').trim();
+    if (owner && S.owners.indexOf(owner) === -1) S.owners.push(owner);
+  }
+  if (d.customer && d.customer.Customer_ID) {
+    const i = S.customers.findIndex(c => c.Customer_ID === d.customer.Customer_ID);
+    if (i === -1) S.customers.push(d.customer); else S.customers[i] = Object.assign({}, S.customers[i], d.customer);
+    S.customers.sort((a, b) => String(a.Company_Name).localeCompare(String(b.Company_Name)));
+  }
+  if (d.activity && d.activity.Activity_ID) S.activities.unshift(d.activity);
+  if (Array.isArray(d.attachments)) d.attachments.slice().reverse().forEach(a => S.attachments.unshift(a));
+  else if (d.Attachment_ID) S.attachments = S.attachments.filter(a => a.Attachment_ID !== d.Attachment_ID);
+
+  // อัปเดตลายเซ็นให้ตรงกับข้อมูลที่เพิ่งแก้ การซิงก์รอบหน้าจะได้ไม่เข้าใจผิด
+  // ว่ามีคนอื่นมาแก้ แล้วเด้งข้อความแจ้งเตือนที่ไม่จริงขึ้นมา
+  S.signature = computeSignature();
+  reindex();
+  saveCache();
+  markActivity();
+}
+
+/* ---------------------------------------------------------------------------
+ * 5. ส่วนแสดงผล
+ * ------------------------------------------------------------------------- */
+let toastTimer = null;
+function toast(message, kind) {
+  const el = $('#toast');
+  el.textContent = message;
+  el.className = 'toast ' + (kind === 'ok' ? 'is-ok' : kind === 'info' ? 'is-info' : 'is-bad');
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 3400);
+}
+
+function go(name, params) {
+  S.view = { name: name, params: params || {} };
+  window.scrollTo({ top: 0 });
+  render();
+  markActivity();
+}
+
+function render() {
+  if (!S.ready) return;
+  S.repaintPending = false;
+  const v = S.view;
+  if (v.name === 'opportunities') viewList();
+  else if (v.name === 'detail') viewDetail(v.params.id);
+  else if (v.name === 'rfq') viewRfq(v.params.opp || {});
+  else if (v.name === 'customers') viewCustomers();
+  else viewDashboard();
+  renderNav();
+}
+
+function renderNav() {
+  const active = S.view.name === 'detail' ? 'opportunities' : S.view.name;
+  const items = [['dashboard', I.dash, 'ภาพรวม'], ['opportunities', I.list, 'งานขาย'], ['rfq', I.plus, 'ขอราคา'], ['customers', I.users, 'ลูกค้า']];
+  const nav = $('#nav');
+  nav.hidden = false;
+  nav.innerHTML = items.map(n => `<button type="button" onclick="go('${n[0]}')" class="${active === n[0] ? 'is-active' : ''}">${n[1]}<span>${n[2]}</span></button>`).join('');
+}
+
+/** แถบบนสุด — มีปุ่มรีเฟรชเอง และป้ายบอกว่าข้อมูลบนจอสดแค่ไหน */
+function header(title, sub, back) {
+  return `<header class="hdr">
+    <div class="hdr-top">
+      ${back ? `<button type="button" class="hdr-btn hdr-btn-icon" onclick="${back}" aria-label="ย้อนกลับ">${I.back}</button>`
+             : `<img src="logo-mark.png" alt="" class="hdr-logo" width="38" height="38">`}
+      <div class="grow">
+        <h1>${esc(title)}</h1>
+        ${sub ? `<div class="hdr-sub" id="hdrSub">${esc(sub)}</div>` : ''}
+      </div>
+      <button type="button" class="hdr-btn hdr-btn-icon" onclick="manualRefresh()" aria-label="โหลดข้อมูลใหม่">${I.refresh}</button>
+      <button type="button" class="hdr-btn" onclick="logout()">${I.logout}<span>ออก</span></button>
+    </div>
+    <div id="syncPill">${syncPill()}</div>
+  </header>`;
+}
+
+function syncPill() {
+  const cls = S.syncing ? 'is-busy' : S.lastError ? 'is-down' : '';
+  let text;
+  if (S.syncing) text = 'กำลังอัปเดตข้อมูล…';
+  else if (S.lastError) text = 'ออฟไลน์ · แสดงข้อมูลที่บันทึกไว้ในเครื่อง';
+  else if (S.lastSyncAt) text = 'ข้อมูลล่าสุด ' + pad2(S.lastSyncAt.getHours()) + ':' + pad2(S.lastSyncAt.getMinutes()) + ' · ' + esc(myName());
+  else text = esc(myName());
+  return `<span class="sync ${cls}"><span class="sync-dot"></span>${text}</span>`;
+}
+
+/** อัปเดตเฉพาะป้ายสถานะ ไม่ต้องวาดทั้งหน้าใหม่ */
+function renderSync() {
+  const el = $('#syncPill');
+  if (el) el.innerHTML = syncPill();
+}
+
+async function manualRefresh() {
+  markActivity();
+  const ok = await refresh({});
+  if (ok) toast('ข้อมูลเป็นปัจจุบันแล้ว', 'ok');
+}
+
+/**
+ * เปิดแอปครั้งแรกแล้วโหลดข้อมูลไม่สำเร็จ และยังไม่มีข้อมูลเก่าในเครื่องให้แสดง
+ *
+ * ส่วนใหญ่เป็นแค่เน็ตหลุดชั่วคราว ปุ่มหลักจึงเป็น "ลองใหม่" ไม่ใช่การออกจากระบบ
+ * (การออกจากระบบจะลบข้อมูลในเครื่องทิ้ง ซึ่งไม่ได้ช่วยอะไรเลยเวลาเน็ตมีปัญหา)
+ */
+function renderFatal(message) {
+  $('#nav').hidden = true;
+  $('#app').innerHTML = `<div class="page"><div class="card stack">
+    <h1>โหลดข้อมูลไม่สำเร็จ</h1>
+    <p class="meta">${esc(message)}</p>
+    <button class="btn btn-primary btn-block" onclick="retryBoot()">${I.refresh}ลองใหม่</button>
+    <button class="btn btn-soft btn-block" onclick="logout()">เข้าสู่ระบบใหม่</button>
+  </div></div>`;
+}
+
+async function retryBoot() {
+  renderSkeleton();
+  await refresh({});
+}
+
+/* --------------------------------------------------------------- เข้าสู่ระบบ */
+let LOGIN_PW = '', LOGIN_NAMES = [];
+
+function renderLogin(message, names) {
+  S.ready = false;
+  $('#nav').hidden = true;
+  $('#app').innerHTML = `<div class="auth"><form class="card stack" onsubmit="submitLogin(event)">
+    <div>
+      <img src="logo-full.jpg" alt="PAKORN Technical Supply" class="auth-logo">
+      <h1 style="text-align:center">PTS Sales</h1>
+      <p class="meta" style="text-align:center">ระบบติดตามงานขาย</p>
+    </div>
+    ${message ? `<p class="auth-err">${esc(message)}</p>` : ''}
+    ${names
+      ? `<label><span class="label">คุณคือใคร *</span>
+          <input name="name" class="field" required autofocus autocomplete="name" minlength="2" maxlength="60"
+                 placeholder="พิมพ์ชื่อของคุณ" list="dl-login-name">
+          <datalist id="dl-login-name">${names.map(n => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+        </label>
+        <p class="hint">ใช้ชื่อเดิมทุกครั้ง ระบบจะได้รวมงานของคุณไว้ที่เดียวกันในหน้า “งานของฉัน”</p>`
+      : `<label><span class="label">รหัสผ่านของทีม *</span><input name="password" type="password" class="field" required autocomplete="current-password" autofocus></label>`}
+    <button class="btn btn-primary btn-block">${names ? 'เข้าใช้งาน' : 'ถัดไป'}</button>
+    <p class="hint" style="text-align:center">ระบบจะจำอุปกรณ์นี้ไว้ 30 วัน</p>
+  </form></div>`;
+}
+
+async function submitLogin(e) {
+  e.preventDefault();
+  lockForm(e, true, 'กำลังตรวจสอบ…');
+  const f = Object.fromEntries(new FormData(e.target));
+  const atNameStep = f.name !== undefined;
+  if (f.password !== undefined) LOGIN_PW = f.password;
+
+  const r = await post('login', { password: LOGIN_PW, name: f.name || '' });
+  if (!r.success) {
+    // พลาดตอนกรอกชื่อ ให้อยู่หน้าเดิม จะได้ไม่ต้องกลับไปกรอกรหัสผ่านของทีมใหม่ทั้งที่กรอกถูกแล้ว
+    if (atNameStep) return renderLogin(r.message, LOGIN_NAMES);
+    LOGIN_PW = '';
+    return renderLogin(r.message);
+  }
+  if (r.data && r.data.needName) {
+    LOGIN_NAMES = r.data.names || [];
+    return renderLogin('', LOGIN_NAMES);
+  }
+  setAuth(r.data.token, r.data.name);
+  LOGIN_PW = '';
+  LOGIN_NAMES = [];
+  boot();
+}
+
+function logout() {
+  if (!confirm('ออกจากระบบ?')) return;
+  clearAuth();
+  location.reload();
+}
+
+function lockForm(e, on, text) {
+  const b = e.target.querySelector('button:not([type="button"])');
+  if (!b) return;
+  if (on) {
+    if (!b.dataset.label) b.dataset.label = b.textContent;
+    b.textContent = text || 'กำลังบันทึก…';
+    b.disabled = true;
+  } else {
+    b.textContent = b.dataset.label || b.textContent;
+    b.disabled = false;
+  }
+}
+
+/* ------------------------------------------------------------------ ชิ้นส่วน */
+function ageBadge(o) {
+  const n = o.Quote_Age_Days;
+  if (n === null || n === undefined || n === '') return '';
+  if (n < S.sla.warn) return '';
+  return `<span class="badge ${n >= S.sla.overdue ? 'tone-red' : 'tone-amber'}">รอเสนอราคา ${n} วัน</span>`;
+}
+
+function oppCard(o) {
+  return `<button type="button" onclick="go('detail',{id:'${esc(o.Opportunity_ID)}'})" class="card card-btn stack-sm">
+    <div class="row-between" style="align-items:flex-start">
+      <strong class="grow">${esc(o.Project_Name)}</strong>
+      <span style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:none">
+        <span class="badge tone-${tone(o.Status)}">${esc(o.Status)}</span>${ageBadge(o)}
+      </span>
+    </div>
+    <div class="meta-strong truncate">${esc(o.Customer.Company_Name || '')}</div>
+    <div class="meta">${esc(o.Opportunity_ID)} · ${esc(o.Owner)} · ติดตาม ${fmtDate(o.Next_Action_Date)}</div>
+  </button>`;
+}
+
+function oppSection(title, items, empty, kind) {
+  const cls = kind === 'danger' ? 'is-danger' : kind === 'warn' ? 'is-warn' : '';
+  const countCls = kind === 'danger' ? 'is-danger' : kind === 'warn' ? 'is-warn' : '';
+  return `<section class="stack">
+    <h2 class="section-title ${items.length ? cls : ''}">${esc(title)}${items.length ? `<span class="count ${countCls}">${items.length}</span>` : ''}</h2>
+    ${items.length ? items.map(oppCard).join('') : `<div class="empty">${esc(empty)}</div>`}
+  </section>`;
+}
+
+function inputField(name, label, value, type, required) {
+  let v = value == null ? '' : value;
+  if (type === 'date') v = dOnly(v);
+  if (type === 'datetime-local') v = String(v).slice(0, 16);
+  return `<label><span class="label">${label}${required ? ' *' : ''}</span><input name="${name}" type="${type || 'text'}" value="${esc(v)}" class="field" ${required ? 'required' : ''}></label>`;
+}
+
+function selectField(name, label, options, value, required) {
+  return `<label><span class="label">${label}${required ? ' *' : ''}</span><select name="${name}" class="field" ${required ? 'required' : ''}>${options.map(x => `<option value="${esc(x)}" ${x === value ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>`;
+}
+
+/** ช่องเลือก + พิมพ์เองได้ (เลือกจากรายการเดิม หรือพิมพ์ชื่อใหม่ลงไปได้เลย) */
+function comboField(name, label, options, value, required, hint) {
+  const id = 'dl-' + name;
+  return `<label><span class="label">${label}${required ? ' *' : ''}</span>
+    <input name="${name}" list="${id}" value="${esc(value == null ? '' : value)}" class="field" ${required ? 'required' : ''} autocomplete="off" placeholder="${esc(hint || '')}">
+    <datalist id="${id}">${options.filter(Boolean).map(x => `<option value="${esc(x)}"></option>`).join('')}</datalist></label>`;
+}
+
+function customerOptions(selected) {
+  return `<option value="">เลือกลูกค้า</option>` + S.customers.map(c =>
+    `<option value="${esc(c.Customer_ID)}" ${selected === c.Customer_ID ? 'selected' : ''}>${esc(c.Company_Name)}${c.Contact_Name ? ' — ' + esc(c.Contact_Name) : ''}</option>`).join('');
+}
+
+/* ------------------------------------------------------------------ ภาพรวม */
+
+/**
+ * คำนวณตัวเลขหน้าภาพรวมจากข้อมูลในเครื่อง
+ * เดิมงานนี้เป็นคำสั่ง dashboardData ที่ฝั่งเซิร์ฟเวอร์ การสลับ "งานของฉัน/ทั้งทีม"
+ * จึงต้องรอเน็ตทุกครั้ง ตอนนี้คิดเสร็จภายในไม่กี่มิลลิวินาที
+ */
+function dashboardStats(owner) {
+  const today = todayStr();
+  const rows = owner ? S.rows.filter(o => String(o.Owner) === owner) : S.rows;
+  const open = rows.filter(o => !isClosed(o.Status));
+
+  const counts = {};
+  S.statuses.filter(s => !isClosed(s)).forEach(s => counts[s] = 0);
+  rows.forEach(o => { if (Object.prototype.hasOwnProperty.call(counts, o.Status)) counts[o.Status]++; });
+
+  const pending = open.filter(o => isPendingQuote(o.Status) && o.Quote_Age_Days !== null)
+    .sort((a, b) => b.Quote_Age_Days - a.Quote_Age_Days);
+  const quoteOverdue = pending.filter(o => o.Quote_Age_Days >= S.sla.overdue);
+  const quoteWarn = pending.filter(o => o.Quote_Age_Days >= S.sla.warn && o.Quote_Age_Days < S.sla.overdue);
+
+  const leadDays = rows.map(o => daysBetween(o.Request_Date, o.Quotation_Sent_Date)).filter(n => n !== null && n >= 0);
+  const onTime = leadDays.filter(n => n <= S.sla.warn).length;
+
+  return {
+    counts: counts,
+    kpi: {
+      pendingQuote: pending.length,
+      quoteWarn: quoteWarn.length,
+      quoteOverdue: quoteOverdue.length,
+      quotedCount: leadDays.length,
+      onTimeRate: leadDays.length ? Math.round(onTime * 100 / leadDays.length) : null,
+      avgLeadDays: leadDays.length ? Math.round(leadDays.reduce((a, b) => a + b, 0) / leadDays.length * 10) / 10 : null
+    },
+    quoteOverdue: quoteOverdue,
+    quoteWarn: quoteWarn,
+    followUpOverdue: open.filter(o => o.Next_Action_Date && dOnly(o.Next_Action_Date) < today)
+      .sort((a, b) => String(a.Next_Action_Date).localeCompare(String(b.Next_Action_Date))),
+    today: open.filter(o => o.Next_Action_Date && dOnly(o.Next_Action_Date) === today),
+    overdue: open.filter(o => o.Due_Date && dOnly(o.Due_Date) < today)
+  };
+}
+
+function viewDashboard() {
+  const owner = S.mine ? myName() : '';
+  const d = dashboardStats(owner);
+  const k = d.kpi;
+  const rate = k.onTimeRate == null ? '—' : k.onTimeRate + '%';
+  const rateTone = k.onTimeRate == null ? 't-mute' : k.onTimeRate >= 80 ? 't-ok' : k.onTimeRate >= 60 ? 't-warn' : 't-bad';
+
+  $('#app').innerHTML = header('PTS Sales', 'ภาพรวมงานขาย') + `<div class="page">
+    <div class="seg">
+      <button type="button" class="${S.mine ? 'is-active' : ''}" onclick="setScope(true)">งานของฉัน</button>
+      <button type="button" class="${S.mine ? '' : 'is-active'}" onclick="setScope(false)">ทั้งทีม</button>
+    </div>
+
+    <div class="grid-3">
+      ${Object.keys(d.counts).map(key => `<button type="button" class="stat ${d.counts[key] ? '' : 'is-zero'}" onclick="openStatus('${esc(key)}')">
+        <div class="stat-n">${d.counts[key]}</div><div class="stat-l">${esc(key)}</div></button>`).join('')}
+    </div>
+
+    <section class="card stack">
+      <div>
+        <h2>KPI การเสนอราคา</h2>
+        <p class="hint">นับจากวันที่ลูกค้าขอราคา ถึงวันที่ส่งใบเสนอราคา · เป้าหมายภายใน ${S.sla.warn} วัน</p>
+      </div>
+      <div class="grid-2 grid-2-sm">
+        <div><div class="kpi-n ${rateTone}">${rate}</div><div class="kpi-l">เสนอราคาทันเป้า</div></div>
+        <div><div class="kpi-n">${k.avgLeadDays == null ? '—' : k.avgLeadDays + ' วัน'}</div><div class="kpi-l">เฉลี่ยที่ใช้จริง</div></div>
+        <div><div class="kpi-n t-warn">${k.quoteWarn}</div><div class="kpi-l">เกิน ${S.sla.warn} วัน</div></div>
+        <div><div class="kpi-n t-bad">${k.quoteOverdue}</div><div class="kpi-l">เกิน ${S.sla.overdue} วัน</div></div>
+      </div>
+      <p class="hint">${k.quotedCount
+        ? 'คำนวณจากงานที่ส่งใบเสนอราคาแล้ว ' + k.quotedCount + ' งาน · ยังรอเสนอราคาอีก ' + k.pendingQuote + ' งาน'
+        : 'ยังไม่มีงานที่บันทึกวันส่งใบเสนอราคา — ระบบจะเริ่มนับให้อัตโนมัติเมื่อเปลี่ยนสถานะเป็น “' + esc(S.quoteSentStatus) + '”'}</p>
+    </section>
+
+    ${oppSection('เกินกำหนดเสนอราคา ' + S.sla.overdue + ' วัน', d.quoteOverdue, 'ไม่มีงานเกินกำหนดเสนอราคา', 'danger')}
+    ${oppSection('ใกล้ครบกำหนดเสนอราคา ' + S.sla.warn + ' วัน', d.quoteWarn, 'ไม่มีงานใกล้ครบกำหนด', 'warn')}
+    ${oppSection('เลยวันติดตาม', d.followUpOverdue, 'ไม่มีงานค้างติดตาม', 'danger')}
+    ${oppSection('งานที่ต้องทำวันนี้', d.today, 'ไม่มีงานติดตามวันนี้')}
+    ${oppSection('งานเกินกำหนดส่ง', d.overdue, 'ไม่มีงานเกินกำหนด')}
+  </div>`;
+}
+
+function setScope(mine) { S.mine = mine; viewDashboard(); }
+
+function openStatus(status) {
+  S.filter = { query: '', status: status, owner: S.mine ? myName() : '', priority: '' };
+  go('opportunities');
+}
+
+/* ---------------------------------------------------------------- รายการงาน */
+function filteredRows() {
+  const f = S.filter;
+  const q = String(f.query || '').trim().toLowerCase();
+  return S.rows.filter(o => {
+    if (f.status && o.Status !== f.status) return false;
+    if (f.owner && o.Owner !== f.owner) return false;
+    if (f.priority && o.Priority !== f.priority) return false;
+    if (!q) return true;
+    return [o.Opportunity_ID, o.Project_Name, o.Quotation_No, o.Customer.Company_Name, o.Requester_Name, o.Requester_Phone]
+      .join(' ').toLowerCase().indexOf(q) !== -1;
+  });
+}
+
+function viewList() {
+  const f = S.filter;
+  const rows = filteredRows();
+  $('#app').innerHTML = header('งานขาย', rows.length + ' จาก ' + S.rows.length + ' รายการ') + `<div class="page">
+    <div class="stack">
+      <input id="q" class="field" value="${esc(f.query)}" placeholder="ค้นหา งาน / บริษัท / โทร / เลขที่ QT" oninput="onSearch(this.value)" autocomplete="off">
+      <div class="grid-3">
+        <select class="field field-sm" onchange="setFilter('status',this.value)"><option value="">ทุกสถานะ</option>${S.statuses.map(s => `<option ${f.status === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
+        <select class="field field-sm" onchange="setFilter('owner',this.value)"><option value="">ทุกผู้รับผิดชอบ</option>${S.owners.map(s => `<option ${f.owner === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
+        <select class="field field-sm" onchange="setFilter('priority',this.value)"><option value="">ทุกความสำคัญ</option>${S.priorities.map(s => `<option ${f.priority === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
+      </div>
+      ${(f.status || f.owner || f.priority || f.query) ? `<button type="button" class="btn btn-soft btn-sm" onclick="clearFilters()">ล้างตัวกรองทั้งหมด</button>` : ''}
+    </div>
+    <div id="rows" class="stack">${listRowsHtml(rows)}</div>
+  </div>`;
+}
+
+function listRowsHtml(rows) {
+  return rows.length ? rows.map(oppCard).join('') : '<div class="empty">ไม่พบงานขายที่ตรงกับเงื่อนไข</div>';
+}
+
+/** ค้นหาแบบพิมพ์ไปเห็นผลไป — วาดใหม่เฉพาะรายการ ช่องพิมพ์จึงไม่เสียโฟกัส */
+function onSearch(value) {
+  S.filter.query = value;
+  const rows = filteredRows();
+  const box = $('#rows');
+  if (box) box.innerHTML = listRowsHtml(rows);
+  const sub = $('#hdrSub');
+  if (sub) sub.textContent = rows.length + ' จาก ' + S.rows.length + ' รายการ';
+}
+
+function setFilter(key, value) { S.filter[key] = value; viewList(); }
+function clearFilters() { S.filter = { query: '', status: '', owner: '', priority: '' }; viewList(); }
+
+/* ------------------------------------------------------------ รายละเอียดงาน */
+function viewDetail(id) {
+  const o = S.byId.get(id);
+  if (!o) {
+    $('#app').innerHTML = header('ไม่พบงานขาย', '', "go('opportunities')") +
+      `<div class="page"><div class="empty">ไม่พบงานขายรหัสนี้ อาจถูกลบไปแล้ว</div></div>`;
+    return;
+  }
+  const c = o.Customer || {};
+  const acts = S.actsBy.get(id) || [];
+  const files = S.filesBy.get(id) || [];
+
+  $('#app').innerHTML = header(o.Opportunity_ID, 'รายละเอียดงานขาย', "go('opportunities')") + `<div class="page">
+    <section class="card stack">
+      <div class="row-between" style="align-items:flex-start">
+        <div class="grow">
+          <h2>${esc(o.Project_Name)}</h2>
+          <p class="meta-strong">${esc(c.Company_Name || '')}</p>
+        </div>
+        <span style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:none">
+          <span class="badge tone-${tone(o.Status)}">${esc(o.Status)}</span>${ageBadge(o)}
+        </span>
+      </div>
+      <div class="grid-2">
+        ${detailPair('ผู้ขอราคา', o.Requester_Name || c.Contact_Name)}
+        ${detailPair('แผนก', o.Requester_Department || c.Department)}
+        ${detailPair('โทร', o.Requester_Phone || c.Phone)}
+        ${detailPair('ผู้รับผิดชอบ', o.Owner)}
+        ${detailPair('ความสำคัญ', o.Priority)}
+        ${detailPair('ครบกำหนด', fmtDate(o.Due_Date))}
+        ${detailPair('Next Action', o.Next_Action)}
+        ${detailPair('วันที่ติดตาม', fmtDate(o.Next_Action_Date))}
+      </div>
+      <div class="grid-2">
+        <button type="button" class="btn btn-soft" onclick="editOpp('${esc(o.Opportunity_ID)}')">${I.edit}แก้ไข</button>
+        <button type="button" class="btn btn-primary" onclick="statusForm('${esc(o.Opportunity_ID)}')">${I.swap}เปลี่ยนสถานะ</button>
+      </div>
+      ${o.Status !== S.voidStatus ? `<button type="button" class="btn btn-danger btn-block" onclick="voidForm('${esc(o.Opportunity_ID)}')">${I.ban}ยกเลิกงาน</button>` : ''}
+    </section>
+
+    <section class="card stack-sm">
+      ${detailRow('สถานที่หน้างาน', o.Site_Location)}
+      ${detailRow('ประเภทงาน', o.Work_Type)}
+      ${detailRow('รายละเอียด', o.Description)}
+      ${detailRow('มูลค่าคาดการณ์', fmtMoney(o.Estimated_Value))}
+      ${detailRow('ใบเสนอราคา', (o.Quotation_No || '-') + ' / ' + fmtMoney(o.Quotation_Amount))}
+      ${o.Quotation_Sent_Date ? detailRow('วันที่ส่งใบเสนอราคา', fmtDate(o.Quotation_Sent_Date)) : ''}
+      ${o.Close_Reason ? detailRow('เหตุผลปิดงาน', o.Close_Reason) : ''}
+      ${o.Remark ? detailRow('หมายเหตุ', o.Remark) : ''}
+    </section>
+
+    <div class="grid-2">
+      <button type="button" class="btn btn-outline" onclick="activityForm('${esc(o.Opportunity_ID)}')">${I.note}เพิ่ม Activity</button>
+      <button type="button" class="btn btn-outline" onclick="uploadForm('${esc(o.Opportunity_ID)}')">${I.clip}แนบไฟล์</button>
+    </div>
+
+    <section class="stack">
+      <h2 class="section-title">Timeline${acts.length ? `<span class="count">${acts.length}</span>` : ''}</h2>
+      ${acts.length ? `<div class="tl">${acts.map(a => `<div class="tl-item card card-tight stack-sm">
+        <div class="row-between"><b>${esc(a.Activity_Type)}</b><span class="hint">${fmtDateTime(a.Activity_Date)}</span></div>
+        <p style="font-size:.88rem">${esc(a.Description)}</p>
+        <div class="hint">โดย ${esc(a.Created_By || '-')}</div>
+      </div>`).join('')}</div>` : '<div class="empty">ยังไม่มีกิจกรรม</div>'}
+    </section>
+
+    <section class="stack">
+      <h2 class="section-title">ไฟล์แนบ${files.length ? `<span class="count">${files.length}</span>` : ''}</h2>
+      ${files.length ? files.map(a => `<div class="card card-tight row">
+        <a class="grow row" href="${esc(a.Drive_URL)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit;min-width:0">
+          <span class="grow truncate" style="font-size:.88rem">${esc(a.File_Name)}</span>
+          <span class="badge tone-slate">${esc(a.Category)}</span>
+          <span style="color:var(--faint);display:flex">${I.ext}</span>
+        </a>
+        <button type="button" class="icon-btn" title="ลบไฟล์" onclick="removeFile('${esc(a.Attachment_ID)}','${esc(o.Opportunity_ID)}')">${I.trash}</button>
+      </div>`).join('') : '<div class="empty">ยังไม่มีไฟล์แนบ</div>'}
+    </section>
+  </div>`;
+}
+
+const detailPair = (label, value) => `<div><div class="hint">${label}</div><div class="meta-strong">${esc(value || '-')}</div></div>`;
+const detailRow = (label, value) => `<p style="font-size:.88rem"><b>${label}:</b> ${esc(value == null || value === '' ? '-' : value)}</p>`;
+
+function editOpp(id) {
+  const o = S.byId.get(id);
+  if (!o) return toast('ไม่พบงานขาย');
+  go('rfq', { opp: o });
+}
+
+/* --------------------------------------------------------------- ฟอร์ม RFQ */
+function viewRfq(o) {
+  o = o || {};
+  const editing = !!o.Opportunity_ID;
+  const workTypes = S.workTypes.slice();
+  if (o.Work_Type && workTypes.indexOf(o.Work_Type) === -1) workTypes.push(o.Work_Type);
+
+  $('#app').innerHTML = header(editing ? 'แก้ไขงานขาย' : 'ขอใบเสนอราคา', editing ? o.Opportunity_ID : 'สร้าง RFQ ใหม่',
+      editing ? `go('detail',{id:'${esc(o.Opportunity_ID)}'})` : '') + `<form class="page" onsubmit="saveOpp(event,'${esc(o.Opportunity_ID || '')}')">
+    <section class="card stack">
+      <h2>ข้อมูลหลัก</h2>
+      <label><span class="label">ลูกค้า *</span><select name="Customer_ID" class="field" required>${customerOptions(o.Customer_ID)}</select></label>
+      ${inputField('Project_Name', 'ชื่อโครงการ', o.Project_Name, 'text', true)}
+      ${inputField('Site_Location', 'สถานที่หน้างาน', o.Site_Location)}
+      ${selectField('Work_Type', 'ประเภทงาน', [''].concat(workTypes), o.Work_Type)}
+      <label><span class="label">รายละเอียด</span><textarea name="Description" class="field" rows="3">${esc(o.Description)}</textarea></label>
+    </section>
+
+    <section class="card stack">
+      <h2>เงื่อนไขและมูลค่า</h2>
+      <div class="grid-2">
+        ${selectField('Priority', 'ความสำคัญ', S.priorities, o.Priority || 'Normal')}
+        ${inputField('Due_Date', 'ครบกำหนด', o.Due_Date, 'date')}
+      </div>
+      ${comboField('Owner', 'ผู้รับผิดชอบ', S.owners, o.Owner || myName(), true, 'เลือกจากรายชื่อ หรือพิมพ์ชื่อใหม่')}
+      <div class="grid-2">
+        ${inputField('Estimated_Value', 'มูลค่าคาดการณ์', o.Estimated_Value, 'number')}
+        ${inputField('Quotation_No', 'เลขที่ใบเสนอราคา', o.Quotation_No)}
+      </div>
+      ${inputField('Quotation_Amount', 'มูลค่าใบเสนอราคา', o.Quotation_Amount, 'number')}
+    </section>
+
+    <section class="card stack">
+      <h2>ติดตามงาน</h2>
+      ${inputField('Next_Action', 'Next Action', o.Next_Action, 'text', true)}
+      ${inputField('Next_Action_Date', 'วันที่ติดตาม', o.Next_Action_Date, 'date', true)}
+      <label><span class="label">หมายเหตุ</span><textarea name="Remark" class="field" rows="2">${esc(o.Remark)}</textarea></label>
+    </section>
+
+    <button class="btn btn-primary btn-block">${editing ? 'บันทึกการแก้ไข' : 'สร้าง RFQ'}</button>
+  </form>`;
+}
+
+async function saveOpp(e, id) {
+  e.preventDefault();
+  lockForm(e, true);
+  const raw = Object.fromEntries(new FormData(e.target));
+  if (id) raw.Opportunity_ID = id;
+  const r = await post('saveOpportunity', raw);
+  if (!r.success) { lockForm(e, false); return toast(r.message); }
+  applyWrite(r);
+  toast(r.message, 'ok');
+  go('detail', { id: (r.data.opportunity && r.data.opportunity.Opportunity_ID) || id });
+}
+
+/* ------------------------------------------------------------------ ลูกค้า */
+function viewCustomers() {
+  $('#app').innerHTML = header('ลูกค้า', S.customers.length + ' รายการ') + `<div class="page">
+    <div class="stack">
+      <input id="cq" class="field" value="${esc(S.customerQuery)}" placeholder="ค้นหาบริษัท / ผู้ติดต่อ / เบอร์โทร" oninput="onCustomerSearch(this.value)" autocomplete="off">
+      <button type="button" class="btn btn-primary btn-block" onclick="customerForm()">${I.plus}เพิ่มลูกค้า</button>
+    </div>
+    <div id="clist" class="stack">${customerRowsHtml()}</div>
+  </div>`;
+}
+
+function customerRowsHtml() {
+  const q = String(S.customerQuery || '').trim().toLowerCase();
+  const rows = q ? S.customers.filter(c => [c.Company_Name, c.Contact_Name, c.Phone, c.Email].join(' ').toLowerCase().indexOf(q) !== -1) : S.customers;
+  if (!rows.length) return '<div class="empty">ไม่พบลูกค้า</div>';
+  return rows.map(c => {
+    const jobs = S.rows.filter(o => o.Customer_ID === c.Customer_ID).length;
+    return `<button type="button" class="card card-btn stack-sm" onclick="customerForm('${esc(c.Customer_ID)}')">
+      <div class="row-between"><strong class="grow truncate">${esc(c.Company_Name)}</strong>${jobs ? `<span class="badge tone-slate">${jobs} งาน</span>` : ''}</div>
+      <div class="meta">${esc(c.Contact_Name || '-')} · ${esc(c.Phone || '-')}</div>
+    </button>`;
+  }).join('');
+}
+
+function onCustomerSearch(value) {
+  S.customerQuery = value;
+  const box = $('#clist');
+  if (box) box.innerHTML = customerRowsHtml();
+}
+
+/* ------------------------------------------------------------------- MODAL */
+function modal(html) {
+  document.body.insertAdjacentHTML('beforeend', `<div id="modal" class="scrim" onclick="if(event.target===this)closeModal()"><div class="sheet">${html}</div></div>`);
+}
+function closeModal() {
+  const m = $('#modal');
+  if (m) m.remove();
+  if (S.repaintPending) render();   // มีข้อมูลใหม่มาระหว่างที่หน้าต่างเปิดอยู่
+}
+const modalHead = title => `<div class="row-between" style="margin-bottom:14px"><h2>${esc(title)}</h2><button type="button" class="icon-btn" onclick="closeModal()">${I.close}</button></div>`;
+
+function statusForm(id) {
+  const o = S.byId.get(id);
+  if (!o) return toast('ไม่พบงานขาย');
+  modal(`<form class="stack" onsubmit="submitStatus(event,'${esc(id)}')">
+    ${modalHead('เปลี่ยนสถานะ')}
+    <p class="meta">สถานะปัจจุบัน <span class="badge tone-${tone(o.Status)}">${esc(o.Status)}</span></p>
+    ${selectField('Status', 'สถานะใหม่', S.statuses, o.Status, true)}
+    ${inputField('Quotation_Amount', 'มูลค่าใบเสนอราคา / Winning Amount', o.Quotation_Amount, 'number')}
+    <label><span class="label">เหตุผลปิดงาน</span><select name="Close_Reason" class="field"><option value="">เลือกเหตุผล</option>${S.closeReasons.map(x => `<option>${esc(x)}</option>`).join('')}</select></label>
+    <label><span class="label">หมายเหตุ</span><textarea name="Remark" class="field" rows="2"></textarea></label>
+    <button class="btn btn-primary btn-block">ยืนยัน</button>
+  </form>`);
+}
+
+async function submitStatus(e, id) {
+  e.preventDefault();
+  lockForm(e, true);
+  const r = await post('changeStatus', Object.assign({ Opportunity_ID: id }, Object.fromEntries(new FormData(e.target))));
+  if (!r.success) { lockForm(e, false); return toast(r.message); }
+  applyWrite(r);
+  closeModal();
+  toast(r.message, 'ok');
+  render();
+}
+
+function activityForm(id) {
+  modal(`<form class="stack" onsubmit="submitActivity(event,'${esc(id)}')">
+    ${modalHead('เพิ่ม Activity')}
+    ${selectField('Activity_Type', 'ประเภท', S.activityTypes, 'Note', true)}
+    <label><span class="label">รายละเอียด *</span><textarea name="Description" required class="field" rows="3"></textarea></label>
+    ${inputField('Activity_Date', 'วันที่/เวลา', nowLocalInput(), 'datetime-local')}
+    ${inputField('Next_Action', 'Next Action')}
+    ${inputField('Next_Action_Date', 'วันที่ติดตาม', '', 'date')}
+    <div class="fieldset stack">
+      <p class="label" style="margin:0">แนบรูป/เอกสารไปพร้อมกัน (ไม่บังคับ)</p>
+      ${selectField('Category', 'ประเภทไฟล์', S.categories, 'Survey')}
+      <label><span class="label">เลือกไฟล์ (ไฟล์ละไม่เกิน 10 MB)</span><input name="files" type="file" multiple class="field"></label>
+      <label><span class="label">หรือถ่ายรูปหน้างาน</span><input name="photos" type="file" accept="image/*" capture="environment" multiple class="field"></label>
+    </div>
+    <button class="btn btn-primary btn-block">บันทึก</button>
+  </form>`);
+}
+
+async function submitActivity(e, id) {
+  e.preventDefault();
+  const form = e.target;
+  const picked = [].concat(Array.from(form.files.files), Array.from(form.photos.files));
+  if (picked.length > 10) return toast('แนบได้ครั้งละไม่เกิน 10 ไฟล์');
+  if (picked.some(x => x.size > 10 * 1024 * 1024)) return toast('มีไฟล์ขนาดเกิน 10 MB');
+
+  lockForm(e, true);
+  const raw = Object.fromEntries(new FormData(form));
+  delete raw.files; delete raw.photos; delete raw.Category;
+  const r = await post('addActivity', Object.assign({ Opportunity_ID: id }, raw));
+  if (!r.success) { lockForm(e, false); return toast(r.message); }
+  applyWrite(r);
+
+  if (picked.length) {
+    lockForm(e, true, 'กำลังอัปโหลดไฟล์…');
+    const up = await post('uploadFiles', { Opportunity_ID: id, Category: form.Category.value || 'Photo', files: await readFiles(picked) });
+    if (!up.success) {
+      closeModal();
+      toast('บันทึกกิจกรรมแล้ว แต่แนบไฟล์ไม่สำเร็จ: ' + up.message);
+      return render();
+    }
+    applyWrite(up);
+  }
+  closeModal();
+  toast(r.message, 'ok');
+  render();
+}
+
+const readFiles = list => Promise.all(list.map(x => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve({ name: x.name, mimeType: x.type, base64: reader.result });
+  reader.onerror = reject;
+  reader.readAsDataURL(x);
+})));
+
+function uploadForm(id) {
+  modal(`<form class="stack" onsubmit="submitFiles(event,'${esc(id)}')">
+    ${modalHead('แนบไฟล์')}
+    ${selectField('Category', 'ประเภทไฟล์', S.categories, 'RFQ', true)}
+    <label><span class="label">เลือกไฟล์ (ไฟล์ละไม่เกิน 10 MB)</span><input name="files" type="file" multiple class="field"></label>
+    <label><span class="label">หรือถ่ายรูปหน้างาน</span><input name="photos" type="file" accept="image/*" capture="environment" multiple class="field"></label>
+    <button class="btn btn-primary btn-block">อัปโหลด</button>
+  </form>`);
+}
+
+async function submitFiles(e, id) {
+  e.preventDefault();
+  const picked = [].concat(Array.from(e.target.files.files), Array.from(e.target.photos.files));
+  if (!picked.length) return toast('กรุณาเลือกไฟล์หรือถ่ายรูปอย่างน้อย 1 ไฟล์');
+  if (picked.length > 10) return toast('อัปโหลดได้ครั้งละไม่เกิน 10 ไฟล์');
+  if (picked.some(x => x.size > 10 * 1024 * 1024)) return toast('มีไฟล์ขนาดเกิน 10 MB');
+
+  lockForm(e, true, 'กำลังอัปโหลด…');
+  const r = await post('uploadFiles', { Opportunity_ID: id, Category: e.target.Category.value, files: await readFiles(picked) });
+  if (!r.success) { lockForm(e, false); return toast(r.message); }
+  applyWrite(r);
+  closeModal();
+  toast(r.message, 'ok');
+  render();
+}
+
+function customerForm(id) {
+  const c = id ? (S.customers.find(x => x.Customer_ID === id) || {}) : {};
+  modal(`<form class="stack" onsubmit="saveCustomerForm(event,'${esc(id || '')}')">
+    ${modalHead(id ? 'แก้ไขลูกค้า' : 'เพิ่มลูกค้า')}
+    ${inputField('Company_Name', 'บริษัท', c.Company_Name, 'text', true)}
+    ${inputField('Contact_Name', 'ผู้ติดต่อ', c.Contact_Name)}
+    ${inputField('Department', 'แผนก', c.Department)}
+    ${inputField('Phone', 'เบอร์โทรศัพท์', c.Phone, 'tel')}
+    ${inputField('Email', 'Email', c.Email, 'email')}
+    <label><span class="label">ที่อยู่</span><textarea name="Address" class="field" rows="2">${esc(c.Address)}</textarea></label>
+    ${inputField('Map_URL', 'Google Maps URL', c.Map_URL, 'url')}
+    <label><span class="label">หมายเหตุ</span><textarea name="Remark" class="field" rows="2">${esc(c.Remark)}</textarea></label>
+    <button class="btn btn-primary btn-block">บันทึก</button>
+  </form>`);
+}
+
+async function saveCustomerForm(e, id) {
+  e.preventDefault();
+  lockForm(e, true);
+  const x = Object.fromEntries(new FormData(e.target));
+  if (id) x.Customer_ID = id;
+  const r = await post('saveCustomer', x);
+  if (!r.success) { lockForm(e, false); return toast(r.message); }
+  applyWrite(r);
+  closeModal();
+  toast(r.message, 'ok');
+  render();
+}
+
+function voidForm(id) {
+  modal(`<form class="stack" onsubmit="submitVoid(event,'${esc(id)}')">
+    ${modalHead('ยกเลิกงาน')}
+    <p class="meta">งานจะถูกปิดเป็นสถานะ “${esc(S.voidStatus)}” พร้อมบันทึกเหตุผล ไม่ถูกลบออกจากระบบ และยังค้นหาย้อนหลังได้</p>
+    <label><span class="label">เหตุผลที่ยกเลิก *</span><textarea name="Reason" required class="field" rows="3"></textarea></label>
+    <button class="btn btn-danger btn-block">ยืนยันยกเลิกงาน</button>
+  </form>`);
+}
+
+async function submitVoid(e, id) {
+  e.preventDefault();
+  lockForm(e, true, 'กำลังยกเลิก…');
+  const r = await post('voidOpportunity', Object.assign({ Opportunity_ID: id }, Object.fromEntries(new FormData(e.target))));
+  if (!r.success) { lockForm(e, false); return toast(r.message); }
+  applyWrite(r);
+  closeModal();
+  toast(r.message, 'ok');
+  render();
+}
+
+async function removeFile(attachmentId, oppId) {
+  if (!confirm('ลบไฟล์นี้หรือไม่? ไฟล์จะถูกย้ายไปถังขยะใน Drive')) return;
+  const r = await post('deleteAttachment', attachmentId);
+  if (!r.success) return toast(r.message);
+  applyWrite(r);
+  toast(r.message, 'ok');
+  render();
+}
+
+/* ---------------------------------------------------------------------------
+ * 6. เริ่มทำงาน
+ * ------------------------------------------------------------------------- */
+function renderSkeleton() {
+  $('#nav').hidden = true;
+  $('#app').innerHTML = header('PTS Sales', 'กำลังโหลดข้อมูล…') + `<div class="page">
+    <div class="sk" style="height:46px"></div>
+    <div class="grid-3">${'<div class="sk" style="height:82px"></div>'.repeat(6)}</div>
+    <div class="sk" style="height:150px"></div>
+    ${'<div class="sk" style="height:94px"></div>'.repeat(3)}
+  </div>`;
+}
+
+function boot() {
+  if (!token()) return renderLogin();
+
+  // เปิดแอปแล้วเห็นข้อมูลทันทีจากก้อนที่เก็บไว้ในเครื่อง ไม่ต้องนั่งดูหน้าจอเปล่า
+  const cached = readCache();
+  if (cached) {
+    applySnapshot(cached);
+    S.ready = true;
+    render();
+  } else {
+    renderSkeleton();
+  }
+
+  refresh({ silent: !!cached });
+  startSync();
+}
+
+boot();
