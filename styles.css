@@ -115,6 +115,7 @@ img { max-width: 100%; }
 
 @media (min-width: 640px) {
   .grid-2-sm { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grid-3 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 /* -------------------------------------------------------------- HEADER */
@@ -352,6 +353,10 @@ select.field-sm { padding-right: 30px; background-position: right 8px center; }
 .tone-orange { background: #ffedd5; color: #c2410c; }
 .tone-violet { background: #f3e8ff; color: #7e22ce; }
 .tone-cyan { background: #cffafe; color: #0e7490; }
+.tone-yellow { background: #fef9c3; color: #a16207; }
+.tone-pink { background: #fce7f3; color: #be185d; }
+.tone-teal { background: #ccfbf1; color: #0f766e; }
+.tone-lime { background: #ecfccb; color: #4d7c0f; }
 .tone-green { background: #dcfce7; color: #15803d; }
 .tone-red { background: #ffe4e6; color: #be123c; }
 .tone-slate { background: #e2e8f0; color: #475569; }
@@ -413,6 +418,19 @@ select.field-sm { padding-right: 30px; background-position: right 8px center; }
 .stat .stat-n { font-size: 1.5rem; font-weight: 700; color: var(--brand-700); line-height: 1.15; }
 .stat .stat-l { margin-top: 2px; font-size: .72rem; color: var(--muted); }
 .stat.is-zero .stat-n { color: var(--faint); }
+
+/* หน้าตั้งค่า — แถวรายการ */
+.master-row { padding: 8px 0; border-bottom: 1px solid var(--line); gap: 6px; }
+.master-row:last-child { border-bottom: 0; }
+.master-row.is-hidden { opacity: .6; }
+.master-row .icon-btn:disabled { opacity: .25; cursor: default; }
+.master-row .icon-btn:hover { color: var(--brand-700); }
+
+/* โหมดลากจัดเรียงการ์ดสถานะ */
+.grid-3.is-arranging .stat { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; border-style: dashed; border-color: var(--brand-600); }
+.grid-3.is-arranging .stat:active { transform: none; }
+.stat.is-placeholder { opacity: .25; }
+.stat.stat-ghost { position: fixed; z-index: 200; margin: 0; pointer-events: none; opacity: .95; border-style: solid; box-shadow: 0 12px 28px rgba(15, 23, 42, .25); transform: scale(1.04); }
 
 @media (hover: hover) and (pointer: fine) {
   .stat:hover { border-color: var(--brand-600); }

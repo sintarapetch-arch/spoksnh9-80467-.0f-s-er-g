@@ -23,7 +23,7 @@
 /* ---------------------------------------------------------------------------
  * 1. ค่าคงที่ + เครื่องมือช่วย
  * ------------------------------------------------------------------------- */
-const TOKEN_KEY = 'pts_token', NAME_KEY = 'pts_name', SNAP_KEY = 'pts_snapshot_v2';
+const TOKEN_KEY = 'pts_token', NAME_KEY = 'pts_name', SNAP_KEY = 'pts_snapshot_v2', ORDER_KEY = 'pts_status_order';
 
 const SYNC_FAST_MS = 5000;      // ช่วงที่เพิ่งมีการใช้งาน
 const SYNC_SLOW_MS = 15000;     // เงียบไปสักพัก
@@ -36,6 +36,19 @@ const CACHE_MAX_CHARS = 3000000;
 const $ = s => document.querySelector(s);
 const esc = v => String(v == null ? '' : v).replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
 const pad2 = n => String(n).padStart(2, '0');
+
+/**
+ * 12 สถานะมาตรฐานของระบบ เรียงตามลำดับงาน — หน้าแอปใช้รายการนี้เป็นหลัก
+ * แล้วเติมสถานะที่หลังบ้านส่งมาเพิ่ม (ถ้ามี) ต่อท้าย จึงแสดงครบแม้ Apps Script ยังเป็นเวอร์ชันเก่า
+ * (ต้องตรงกับ APP.STATUS ใน Config.gs)
+ */
+const STATUS_ORDER = [
+  'ขอใบเสนอราคา', 'ต้องเข้าสำรวจหน้างาน', 'สำรวจหน้างานแล้ว', 'ต้องขอข้อมูลเพิ่มเติม', 'ระหว่างจัดทำใบเสนอราคา',
+  'ส่งใบเสนอราคาแล้ว', 'ต้องติดตาม', 'ขอคู่เทียบ', 'ระหว่างพิจารณา', 'ส่งตั้งงบปีหน้า',
+  'อนุมัติ/ได้งาน', 'ไม่อนุมัติ/ไม่ได้งาน'
+];
+const CLOSED_ORDER = ['อนุมัติ/ได้งาน', 'ไม่อนุมัติ/ไม่ได้งาน'];
+const mergeList = (base, extra) => base.concat((extra || []).filter(x => base.indexOf(x) === -1));
 
 /** ตัดค่าวันที่ให้เหลือ yyyy-MM-dd ไม่ว่าจะรับมาเป็นข้อความหรือ Date */
 function dOnly(value) {
@@ -74,6 +87,10 @@ const I = {
   swap: svg('<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>'),
   ban: svg('<circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/>'),
   close: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  gear: svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'),
+  history: svg('<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/><polyline points="12 7 12 12 15 14"/>'),
+  up: svg('<polyline points="18 15 12 9 6 15"/>'),
+  down: svg('<polyline points="6 9 12 15 18 9"/>'),
   ext: svg('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>')
 };
 
@@ -92,12 +109,15 @@ const S = {
 
   customers: [], opportunities: [], activities: [], attachments: [],
   owners: [], workTypes: [], closeReasons: [],
-  statuses: [], closedStatus: [], pendingQuoteStatus: [],
+  statuses: STATUS_ORDER.slice(), closedStatus: CLOSED_ORDER.slice(), pendingQuoteStatus: [],
+  master: null,          // รายการตั้งค่า (รวมที่ซ่อน) จากหลังบ้านรุ่นใหม่ — ใช้ในหน้า "ตั้งค่า"
+  editableLists: false,  // true = หลังบ้านรุ่นที่แก้รายการจากในแอปได้
   priorities: [], categories: [], activityTypes: [],
   wonStatus: '', voidStatus: '', quoteSentStatus: '',
   sla: { warn: 7, overdue: 15 },
 
   filter: { query: '', status: '', owner: '', priority: '' },
+  arrange: false,   // โหมดลากจัดเรียงการ์ดสถานะในหน้าภาพรวม
   customerQuery: '',
 
   repaintPending: false,
@@ -122,6 +142,10 @@ const STATUS_TONE = {
   'ต้องขอข้อมูลเพิ่มเติม': 'orange',
   'ระหว่างจัดทำใบเสนอราคา': 'violet',
   'ส่งใบเสนอราคาแล้ว': 'cyan',
+  'ต้องติดตาม': 'yellow',
+  'ขอคู่เทียบ': 'pink',
+  'ระหว่างพิจารณา': 'teal',
+  'ส่งตั้งงบปีหน้า': 'lime',
   'อนุมัติ/ได้งาน': 'green',
   'ไม่อนุมัติ/ไม่ได้งาน': 'red'
 };
@@ -171,6 +195,12 @@ function applySnapshot(data) {
     'statuses', 'closedStatus', 'pendingQuoteStatus', 'priorities', 'categories', 'activityTypes'
   ].forEach(k => { if (Array.isArray(data[k])) S[k] = data[k]; });
   ['wonStatus', 'voidStatus', 'quoteSentStatus'].forEach(k => { if (data[k]) S[k] = data[k]; });
+  S.editableLists = !!data.editableLists;
+  if (data.master && typeof data.master === 'object') S.master = data.master;
+  // หลังบ้านรุ่นใหม่: รายชื่อสถานะมาจาก Master_Data ที่ผู้ใช้จัดเอง ใช้ตามนั้นเลย
+  // หลังบ้านรุ่นเก่า: ยึด 12 สถานะมาตรฐานเป็นหลัก แล้วต่อท้ายด้วยของที่ส่งมาเพิ่ม
+  if (!S.editableLists) S.statuses = mergeList(STATUS_ORDER, S.statuses);
+  S.closedStatus = mergeList(CLOSED_ORDER, S.closedStatus);
   if (data.sla) S.sla = data.sla;
 
   const signature = computeSignature();
@@ -188,7 +218,8 @@ function snapshotForCache() {
     owners: S.owners, workTypes: S.workTypes, closeReasons: S.closeReasons,
     statuses: S.statuses, closedStatus: S.closedStatus, pendingQuoteStatus: S.pendingQuoteStatus,
     priorities: S.priorities, categories: S.categories, activityTypes: S.activityTypes,
-    wonStatus: S.wonStatus, voidStatus: S.voidStatus, quoteSentStatus: S.quoteSentStatus, sla: S.sla
+    wonStatus: S.wonStatus, voidStatus: S.voidStatus, quoteSentStatus: S.quoteSentStatus, sla: S.sla,
+    master: S.master, editableLists: S.editableLists
   };
 }
 
@@ -411,6 +442,13 @@ function applyWrite(out) {
     if (i === -1) S.customers.push(d.customer); else S.customers[i] = Object.assign({}, S.customers[i], d.customer);
     S.customers.sort((a, b) => String(a.Company_Name).localeCompare(String(b.Company_Name)));
   }
+  if (d.master && typeof d.master === 'object') {
+    S.master = d.master;
+    if (Array.isArray(d.statuses)) S.statuses = d.statuses;
+    if (Array.isArray(d.workTypes)) S.workTypes = d.workTypes;
+    if (Array.isArray(d.closeReasons)) S.closeReasons = d.closeReasons;
+    S.closedStatus = mergeList(CLOSED_ORDER, S.closedStatus);
+  }
   if (d.activity && d.activity.Activity_ID) S.activities.unshift(d.activity);
   if (Array.isArray(d.attachments)) d.attachments.slice().reverse().forEach(a => S.attachments.unshift(a));
   else if (d.Attachment_ID) S.attachments = S.attachments.filter(a => a.Attachment_ID !== d.Attachment_ID);
@@ -451,6 +489,7 @@ function render() {
   else if (v.name === 'detail') viewDetail(v.params.id);
   else if (v.name === 'rfq') viewRfq(v.params.opp || {});
   else if (v.name === 'customers') viewCustomers();
+  else if (v.name === 'settings') viewSettings();
   else viewDashboard();
   renderNav();
 }
@@ -473,6 +512,7 @@ function header(title, sub, back) {
         <h1>${esc(title)}</h1>
         ${sub ? `<div class="hdr-sub" id="hdrSub">${esc(sub)}</div>` : ''}
       </div>
+      <button type="button" class="hdr-btn hdr-btn-icon" onclick="go('settings')" aria-label="ตั้งค่า">${I.gear}</button>
       <button type="button" class="hdr-btn hdr-btn-icon" onclick="manualRefresh()" aria-label="โหลดข้อมูลใหม่">${I.refresh}</button>
       <button type="button" class="hdr-btn" onclick="logout()">${I.logout}<span>ออก</span></button>
     </div>
@@ -658,8 +698,9 @@ function dashboardStats(owner) {
   const rows = owner ? S.rows.filter(o => String(o.Owner) === owner) : S.rows;
   const open = rows.filter(o => !isClosed(o.Status));
 
+  // การ์ดนับจำนวนในหน้าภาพรวม — แสดงครบทุกสถานะ รวมสถานะปิด (ได้งาน/ไม่ได้งาน) ด้วย
   const counts = {};
-  S.statuses.filter(s => !isClosed(s)).forEach(s => counts[s] = 0);
+  S.statuses.forEach(s => counts[s] = 0);
   rows.forEach(o => { if (Object.prototype.hasOwnProperty.call(counts, o.Status)) counts[o.Status]++; });
 
   const pending = open.filter(o => isPendingQuote(o.Status) && o.Quote_Age_Days !== null)
@@ -702,8 +743,19 @@ function viewDashboard() {
       <button type="button" class="${S.mine ? '' : 'is-active'}" onclick="setScope(false)">ทั้งทีม</button>
     </div>
 
-    <div class="grid-3">
-      ${Object.keys(d.counts).map(key => `<button type="button" class="stat ${d.counts[key] ? '' : 'is-zero'}" onclick="openStatus('${esc(key)}')">
+    <div class="row-between">
+      <p class="hint" style="margin:0">${S.arrange ? 'ลากการ์ดไปวางตำแหน่งที่ต้องการ แล้วกด เสร็จ' : 'แตะการ์ดเพื่อดูรายการงานในสถานะนั้น'}</p>
+      <div class="row" style="gap:6px">
+        ${S.arrange ? `<button type="button" class="btn btn-soft btn-sm" onclick="resetStatusOrder()">ค่าเริ่มต้น</button>` : ''}
+        <button type="button" class="btn ${S.arrange ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="toggleArrange()">${S.arrange ? 'เสร็จ' : 'จัดเรียง'}</button>
+      </div>
+    </div>
+
+    <div class="grid-3 ${S.arrange ? 'is-arranging' : ''}">
+      ${statusOrder().map(key => `<button type="button" class="stat ${d.counts[key] ? '' : 'is-zero'}" data-status="${esc(key)}"
+        ${S.arrange
+          ? 'onpointerdown="startDrag(event,this)" onpointermove="moveDrag(event)" onpointerup="endDrag()" onpointercancel="endDrag()"'
+          : `onclick="openStatus('${esc(key)}')"`}>
         <div class="stat-n">${d.counts[key]}</div><div class="stat-l">${esc(key)}</div></button>`).join('')}
     </div>
 
@@ -732,6 +784,63 @@ function viewDashboard() {
 }
 
 function setScope(mine) { S.mine = mine; viewDashboard(); }
+
+/* ---------------------------------------------------- จัดเรียงการ์ดสถานะ
+ * ผู้ใช้ลากการ์ดในหน้าภาพรวมเพื่อเรียงลำดับเอง ลำดับเก็บไว้ในเครื่อง (localStorage)
+ * แยกกันแต่ละเครื่อง ไม่กระทบคนอื่นและไม่กระทบหลังบ้าน
+ * สถานะใหม่ที่ยังไม่เคยจัด จะต่อท้ายตามลำดับมาตรฐาน
+ * ใช้ Pointer Events (ไม่ใช้ HTML5 drag) เพราะบนมือถือ/iOS ลากได้จริง
+ */
+function statusOrder() {
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(ORDER_KEY) || '[]'); } catch (e) { saved = []; }
+  if (!Array.isArray(saved)) saved = [];
+  const known = saved.filter(s => S.statuses.indexOf(s) !== -1);
+  return known.concat(S.statuses.filter(s => known.indexOf(s) === -1));
+}
+function saveStatusOrder(list) { try { localStorage.setItem(ORDER_KEY, JSON.stringify(list)); } catch (e) {} }
+function resetStatusOrder() { try { localStorage.removeItem(ORDER_KEY); } catch (e) {} toast('คืนลำดับมาตรฐานแล้ว', 'ok'); viewDashboard(); }
+function toggleArrange() { S.arrange = !S.arrange; if (!S.arrange) toast('บันทึกลำดับการ์ดแล้ว', 'ok'); viewDashboard(); }
+
+let drag = null;   // { el, ghost, grid, dx, dy }
+
+function startDrag(e, el) {
+  if (!S.arrange || drag || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  e.preventDefault();
+  const r = el.getBoundingClientRect();
+  const ghost = el.cloneNode(true);
+  ghost.className = 'stat stat-ghost';
+  ghost.style.width = r.width + 'px';
+  ghost.style.height = r.height + 'px';
+  ghost.style.left = r.left + 'px';
+  ghost.style.top = r.top + 'px';
+  document.body.appendChild(ghost);
+  el.classList.add('is-placeholder');
+  drag = { el: el, ghost: ghost, grid: el.parentNode, dx: e.clientX - r.left, dy: e.clientY - r.top };
+  try { el.setPointerCapture(e.pointerId); } catch (err) {}
+}
+
+function moveDrag(e) {
+  if (!drag) return;
+  e.preventDefault();
+  drag.ghost.style.left = (e.clientX - drag.dx) + 'px';
+  drag.ghost.style.top = (e.clientY - drag.dy) + 'px';
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const target = under && under.closest ? under.closest('.stat') : null;
+  if (!target || target === drag.el || target.parentNode !== drag.grid) return;
+  const cards = Array.from(drag.grid.children);
+  const from = cards.indexOf(drag.el), to = cards.indexOf(target);
+  if (from < to) drag.grid.insertBefore(drag.el, target.nextSibling);
+  else drag.grid.insertBefore(drag.el, target);
+}
+
+function endDrag() {
+  if (!drag) return;
+  drag.ghost.remove();
+  drag.el.classList.remove('is-placeholder');
+  saveStatusOrder(Array.from(drag.grid.children).map(c => c.dataset.status));
+  drag = null;
+}
 
 function openStatus(status) {
   S.filter = { query: '', status: status, owner: S.mine ? myName() : '', priority: '' };
@@ -885,7 +994,9 @@ function viewRfq(o) {
       editing ? `go('detail',{id:'${esc(o.Opportunity_ID)}'})` : '') + `<form class="page" onsubmit="saveOpp(event,'${esc(o.Opportunity_ID || '')}')">
     <section class="card stack">
       <h2>ข้อมูลหลัก</h2>
-      <label><span class="label">ลูกค้า *</span><select name="Customer_ID" class="field" required>${customerOptions(o.Customer_ID)}</select></label>
+      ${editing ? '' : `<button type="button" class="btn btn-outline btn-block" onclick="reuseForm()">${I.history}ดึงข้อมูลจากงานเก่ามาใช้</button>`}
+      <label><span class="label">ลูกค้า *</span><select name="Customer_ID" class="field" required onchange="onCustomerPick(this.value)">${customerOptions(o.Customer_ID)}</select></label>
+      <div id="reuseHint">${editing ? '' : reuseHint(o.Customer_ID)}</div>
       ${inputField('Project_Name', 'ชื่อโครงการ', o.Project_Name, 'text', true)}
       ${inputField('Site_Location', 'สถานที่หน้างาน', o.Site_Location)}
       ${selectField('Work_Type', 'ประเภทงาน', [''].concat(workTypes), o.Work_Type)}
@@ -917,6 +1028,78 @@ function viewRfq(o) {
   </form>`;
 }
 
+/* ------------------------------------------------ ดึงข้อมูลจากงานเก่า
+ * ลูกค้าเดิมมักขอราคางานคล้ายๆ เดิม (PM ปีถัดไป, ซ่อมระบบเดิม, ไซต์เดิม)
+ * เลือกงานเก่าแล้วระบบเติมช่องให้ก่อน ผู้ใช้แก้เฉพาะส่วนที่ต่าง
+ */
+function customerJobs(customerId) {
+  return customerId ? S.rows.filter(o => o.Customer_ID === customerId) : [];
+}
+
+function reuseHint(customerId) {
+  const n = customerJobs(customerId).length;
+  if (!n) return '';
+  return `<p class="hint" style="margin:-4px 0 0">ลูกค้ารายนี้มีงานเก่า ${n} รายการ · <a href="#" onclick="reuseForm('${esc(customerId)}');return false">ดึงข้อมูลมาใช้</a></p>`;
+}
+
+function onCustomerPick(customerId) {
+  const box = $('#reuseHint');
+  if (box) box.innerHTML = reuseHint(customerId);
+}
+
+function reuseForm(customerId) {
+  const form = document.querySelector('form.page');
+  const sel = form && form.elements.Customer_ID;
+  const cid = customerId || (sel ? sel.value : '');
+  const cname = cid ? ((S.customers.find(c => c.Customer_ID === cid) || {}).Company_Name || '') : '';
+  modal(`<div class="stack">
+    ${modalHead('ดึงข้อมูลจากงานเก่า')}
+    <p class="meta">${cid ? 'งานเก่าของ ' + esc(cname) : 'เลือกงานเก่าจากลูกค้ารายใดก็ได้ ระบบจะเลือกลูกค้าให้ด้วย'}</p>
+    <input id="rq" class="field" placeholder="ค้นหา ชื่อโครงการ / บริษัท / เลขที่งาน" oninput="renderReuseList('${esc(cid)}', this.value)" autocomplete="off">
+    <div id="rlist" class="stack-sm">${reuseListHtml(cid, '')}</div>
+  </div>`);
+}
+
+function reuseListHtml(cid, query) {
+  const q = String(query || '').trim().toLowerCase();
+  let rows = cid ? customerJobs(cid) : S.rows;
+  if (q) rows = rows.filter(o => [o.Opportunity_ID, o.Project_Name, o.Customer.Company_Name, o.Site_Location].join(' ').toLowerCase().indexOf(q) !== -1);
+  rows = rows.slice(0, 40);
+  if (!rows.length) return '<div class="empty">ไม่พบงานเก่า</div>';
+  return rows.map(o => `<button type="button" class="card card-btn stack-sm" onclick="applyReuse('${esc(o.Opportunity_ID)}')">
+    <div class="row-between" style="align-items:flex-start"><strong class="grow">${esc(o.Project_Name)}</strong><span class="badge tone-${tone(o.Status)}">${esc(o.Status)}</span></div>
+    <div class="meta-strong truncate">${esc(o.Customer.Company_Name || '')}</div>
+    <div class="meta">${esc(o.Opportunity_ID)} · ${esc(o.Work_Type || '-')} · ${fmtDate(o.Request_Date)}</div>
+  </button>`).join('');
+}
+
+function renderReuseList(cid, query) {
+  const box = $('#rlist');
+  if (box) box.innerHTML = reuseListHtml(cid, query);
+}
+
+/** เติมช่องในฟอร์มจากงานเก่า — ไม่แตะผู้รับผิดชอบ วันที่ และการติดตาม เพราะเป็นของงานใหม่ */
+function applyReuse(id) {
+  const o = S.byId.get(id);
+  const form = document.querySelector('form.page');
+  if (!o || !form) return toast('ไม่พบงานเก่า');
+  const set = (name, value) => { const el = form.elements[name]; if (el) el.value = value == null ? '' : value; };
+  if (o.Work_Type && !Array.from(form.elements.Work_Type.options).some(x => x.value === o.Work_Type)) {
+    form.elements.Work_Type.insertAdjacentHTML('beforeend', `<option value="${esc(o.Work_Type)}">${esc(o.Work_Type)}</option>`);
+  }
+  set('Customer_ID', o.Customer_ID);
+  set('Project_Name', o.Project_Name);
+  set('Site_Location', o.Site_Location);
+  set('Work_Type', o.Work_Type);
+  set('Description', o.Description);
+  set('Priority', o.Priority || 'Normal');
+  set('Estimated_Value', o.Estimated_Value);
+  onCustomerPick(o.Customer_ID);
+  closeModal();
+  toast('ดึงข้อมูลจาก ' + o.Opportunity_ID + ' แล้ว แก้ส่วนที่ต่างได้เลย', 'ok');
+  const el = form.elements.Project_Name; if (el) el.focus();
+}
+
 async function saveOpp(e, id) {
   e.preventDefault();
   lockForm(e, true);
@@ -927,6 +1110,79 @@ async function saveOpp(e, id) {
   applyWrite(r);
   toast(r.message, 'ok');
   go('detail', { id: (r.data.opportunity && r.data.opportunity.Opportunity_ID) || id });
+}
+
+/* ----------------------------------------------------------------- ตั้งค่า
+ * เพิ่ม / ซ่อน / จัดลำดับ สถานะ ประเภทงาน เหตุผลปิดงาน ได้เองจากในแอป
+ * ทุกอย่างเก็บใน Master_Data บน Google Sheet มีผลกับทุกคนทันที
+ */
+const MASTER_TYPES = [
+  ['Status', 'สถานะงาน', 'เช่น รอผลประมูล'],
+  ['Work_Type', 'ประเภทงาน', 'เช่น PM Chiller'],
+  ['Close_Reason', 'เหตุผลปิดงาน', 'เช่น ลูกค้าเลือกเจ้าอื่น']
+];
+
+function viewSettings() {
+  $('#app').innerHTML = header('ตั้งค่า', 'รายการตัวเลือกของระบบ', "go('dashboard')") + `<div class="page">
+    ${!S.editableLists ? `<div class="empty">ต้องอัปเดต Apps Script เป็นรุ่นล่าสุดก่อน จึงจะแก้รายการจากในแอปได้<br><span class="hint">(อัปโหลดไฟล์ในโฟลเดอร์ apps-script แล้ว Deploy → New version)</span></div>`
+    : `<p class="hint">ผู้รับผิดชอบไม่ต้องตั้งค่า — พิมพ์ชื่อใหม่ในช่องผู้รับผิดชอบได้เลยตอนสร้างงาน</p>` + MASTER_TYPES.map(t => masterSection(t[0], t[1], t[2])).join('')}
+  </div>`;
+}
+
+function masterSection(type, label, hint) {
+  const items = (S.master && S.master[type]) || [];
+  return `<section class="card stack" id="ms-${type}">
+    <h2>${esc(label)}</h2>
+    <form class="row" onsubmit="addMaster(event,'${type}')">
+      <input name="Name" class="field grow" placeholder="${esc(hint)}" required autocomplete="off" maxlength="60">
+      <button class="btn btn-primary btn-sm">เพิ่ม</button>
+    </form>
+    <div class="stack-sm">${items.length ? items.map((it, i) => masterRow(type, it, i, items.length)).join('') : '<div class="empty">ยังไม่มีรายการ</div>'}</div>
+  </section>`;
+}
+
+function masterRow(type, it, i, total) {
+  const n = esc(it.Name);
+  return `<div class="row master-row ${it.Active ? '' : 'is-hidden'}">
+    <div class="grow">
+      <div class="${it.Active ? 'meta-strong' : 'meta'}">${n}${it.Locked ? ' <span class="badge tone-slate">หลัก</span>' : ''}${type === 'Status' && it.Used ? ` <span class="badge tone-slate">${it.Used} งาน</span>` : ''}</div>
+      ${it.Active ? '' : '<div class="hint">ซ่อนอยู่</div>'}
+    </div>
+    <button type="button" class="icon-btn" onclick="moveMaster('${type}','${n}',-1)" ${i === 0 ? 'disabled' : ''} aria-label="เลื่อนขึ้น">${I.up}</button>
+    <button type="button" class="icon-btn" onclick="moveMaster('${type}','${n}',1)" ${i === total - 1 ? 'disabled' : ''} aria-label="เลื่อนลง">${I.down}</button>
+    ${it.Locked ? '' : `<button type="button" class="btn btn-soft btn-sm" onclick="toggleMaster('${type}','${n}',${it.Active ? 'false' : 'true'})">${it.Active ? 'ซ่อน' : 'แสดง'}</button>`}
+  </div>`;
+}
+
+async function addMaster(e, type) {
+  e.preventDefault();
+  lockForm(e, true);
+  const r = await post('addMasterItem', { Type: type, Name: e.target.elements.Name.value });
+  if (!r.success) { lockForm(e, false); return toast(r.message); }
+  applyWrite(r);
+  toast(r.message, 'ok');
+  viewSettings();
+}
+
+async function toggleMaster(type, name, active) {
+  const r = await post('setMasterActive', { Type: type, Name: name, Active: active });
+  if (!r.success) return toast(r.message);
+  applyWrite(r);
+  toast(r.message, 'ok');
+  viewSettings();
+}
+
+async function moveMaster(type, name, dir) {
+  const names = ((S.master && S.master[type]) || []).map(x => x.Name);
+  const i = names.indexOf(name), j = i + dir;
+  if (i < 0 || j < 0 || j >= names.length) return;
+  names.splice(i, 1); names.splice(j, 0, name);
+  // ขยับบนจอก่อน ให้รู้สึกตอบสนองทันที แล้วค่อยบันทึก
+  S.master[type] = names.map(n => S.master[type].find(x => x.Name === n));
+  viewSettings();
+  const r = await post('saveMasterOrder', { Type: type, Names: names });
+  if (!r.success) { toast(r.message); await refresh({ silent: true }); return; }
+  applyWrite(r);
 }
 
 /* ------------------------------------------------------------------ ลูกค้า */
