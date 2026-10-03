@@ -1059,10 +1059,9 @@ const OPP_FIELDS = [
   { label: 'สถานที่หน้างาน', get: o => o.Site_Location },
   { label: 'ผู้ขอราคา', get: o => o.Requester_Name },
   { label: 'แผนก', get: o => o.Requester_Department || o.Customer.Department },
-  { label: 'เบอร์โทร', get: o => o.Requester_Phone || o.Customer.Phone },
-  { label: 'รายละเอียด', get: o => o.Description },
-  { label: 'หมายเหตุ', get: o => o.Remark },
-  { label: 'Next Action', get: o => o.Next_Action }
+  { label: 'เบอร์โทร', get: o => o.Requester_Phone || o.Customer.Phone }
+  // ไม่ค้นใน รายละเอียด / หมายเหตุ / Next Action — ข้อความยาวและไม่ได้แสดงบนการ์ด
+  // ค้นแล้วติดขึ้นมาเยอะจนหาของที่ต้องการไม่เจอ
 ];
 
 function filteredRows() {
