@@ -419,6 +419,42 @@ select.field-sm { padding-right: 30px; background-position: right 8px center; }
 .stat .stat-l { margin-top: 2px; font-size: .72rem; color: var(--muted); }
 .stat.is-zero .stat-n { color: var(--faint); }
 
+/* ข้อความที่ผู้ใช้พิมพ์เอง — คงบรรทัดที่เคาะไว้ และตัดคำยาวไม่ให้ล้นจอ */
+.pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ช่องเลือกแบบค้นหาได้ */
+.picker { position: relative; }
+.picker-list {
+  position: absolute;
+  z-index: 60;
+  left: 0; right: 0;
+  margin-top: 4px;
+  max-height: 46vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  box-shadow: var(--sh-2);
+  padding: 4px;
+}
+.picker-item {
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.picker-item:hover, .picker-item.is-active { background: var(--brand-50); }
+.picker-main { display: block; font-size: .9rem; font-weight: 600; color: var(--ink-2); }
+.picker-sub { display: block; margin-top: 1px; font-size: .76rem; color: var(--muted); }
+.picker-empty { padding: 10px; font-size: .82rem; color: var(--muted); }
+
+textarea.field { resize: vertical; min-height: 64px; line-height: 1.5; }
+
 /* หน้าตั้งค่า — แถวรายการ */
 .master-row { padding: 8px 0; border-bottom: 1px solid var(--line); gap: 6px; }
 .master-row:last-child { border-bottom: 0; }

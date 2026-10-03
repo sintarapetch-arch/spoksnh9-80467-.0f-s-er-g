@@ -50,6 +50,160 @@ const STATUS_ORDER = [
 const CLOSED_ORDER = ['อนุมัติ/ได้งาน', 'ไม่อนุมัติ/ไม่ได้งาน'];
 const mergeList = (base, extra) => base.concat((extra || []).filter(x => base.indexOf(x) === -1));
 
+/* ---------------------------------------------------------------------------
+ * ค้นหาด้วยคีย์เวิร์ดสั้นๆ
+ *
+ * พิมพ์ไม่กี่ตัวก็เจอ ไม่ต้องพิมพ์ให้ตรงเป๊ะหรือตรงตั้งแต่ตัวแรก
+ *   "ทดสอบ"      เจอ "บริษัท ทดสอบ จำกัด"      (อยู่กลางข้อความก็เจอ)
+ *   "ทสบ"        เจอ "บริษัท ทดสอบ จำกัด"      (พิมพ์ย่อ เอาเฉพาะตัวอักษรที่จำได้)
+ *   "ทด จำกัด"   เจอ "บริษัท ทดสอบ จำกัด"      (หลายคำ เจอครบทุกคำจึงนับว่าตรง)
+ * ยิ่งตรงมากคะแนนยิ่งสูง แล้วเอาคะแนนไปเรียงลำดับผลลัพธ์
+ * ------------------------------------------------------------------------- */
+
+/** คะแนนของคำเดียว เทียบกับข้อความที่แปลงเป็นตัวพิมพ์เล็กแล้ว */
+function wordScore(text, word) {
+  const i = text.indexOf(word);
+  if (i === 0) return 100;                       // ขึ้นต้นตรง = ตรงที่สุด
+  if (i > 0) return 70 - Math.min(i, 25);        // เจอกลางข้อความ ยิ่งอยู่ต้นยิ่งได้คะแนน
+  // ไม่เจอเป็นก้อน — ลองแบบ "ตัวอักษรเรียงกัน" เผื่อพิมพ์ย่อหรือพิมพ์ตกบางตัว
+  let j = 0, gaps = 0, last = -1;
+  for (let k = 0; k < text.length && j < word.length; k++) {
+    if (text[k] !== word[j]) continue;
+    if (last >= 0 && k - last > 1) gaps++;
+    last = k; j++;
+  }
+  if (j < word.length) return 0;                 // มีตัวที่หาไม่เจอ = ไม่ตรง
+  return Math.max(1, 40 - gaps);
+}
+
+/** คะแนนรวมของข้อความหนึ่งก้อน เทียบกับคำค้น (0 = ไม่ตรง) */
+function matchScore(text, query) {
+  const q = String(query == null ? '' : query).trim().toLowerCase();
+  if (!q) return 1;
+  const t = String(text == null ? '' : text).toLowerCase();
+  if (!t) return 0;
+  const words = q.split(/\s+/).filter(Boolean);
+  let total = 0;
+  for (let i = 0; i < words.length; i++) {
+    const sc = wordScore(t, words[i]);
+    if (!sc) return 0;                           // ต้องเจอครบทุกคำ
+    total += sc;
+  }
+  return total / words.length;
+}
+
+/** กรอง + เรียงรายการตามความใกล้เคียง — fields = ฟังก์ชันดึงข้อความที่ใช้ค้นจากแต่ละแถว */
+function searchRank(rows, query, fields) {
+  const q = String(query == null ? '' : query).trim();
+  if (!q) return rows.slice();
+  return rows
+    .map(r => ({ r: r, sc: matchScore(fields(r), q) }))
+    .filter(x => x.sc > 0)
+    .sort((a, b) => b.sc - a.sc)
+    .map(x => x.r);
+}
+
+/* ---------------------------------------------------- ช่องเลือกแบบค้นหาได้
+ * พิมพ์คีย์เวิร์ดสั้นๆ แล้วรายการที่ใกล้เคียงจะเด้งขึ้นมาให้กดเลือก
+ * ใช้แทน <select> ยาวๆ และ datalist (ซึ่งบางเบราว์เซอร์ค้นได้แค่ตัวขึ้นต้น)
+ *
+ * 2 แบบ
+ *   allowNew = true   ช่องพิมพ์เองได้ ค่าที่ส่งคือสิ่งที่พิมพ์ (ผู้รับผิดชอบ / แผนก)
+ *   allowNew = false  ต้องเลือกจากรายการ ค่าที่ส่งคือ id ที่ซ่อนไว้ (ลูกค้า)
+ */
+const PICKERS = {};
+let pickerSeq = 0;
+
+/**
+ * items = [{ value, label, sub }]  value = ค่าที่ส่งจริง · label = ข้อความที่เห็น · sub = บรรทัดรอง
+ * extra = ข้อความเพิ่มที่ใช้ค้นได้แต่ไม่ต้องแสดง (เช่น เบอร์โทร)
+ */
+function pickerField(opts) {
+  const o = opts || {};
+  const id = 'pk' + (++pickerSeq);
+  const items = (o.items || []).filter(x => x && x.value !== undefined && x.value !== null);
+  PICKERS[id] = { items: items, allowNew: !!o.allowNew, name: o.name, onPick: o.onPick };
+  const current = items.find(x => String(x.value) === String(o.value == null ? '' : o.value));
+  const shown = o.allowNew ? (o.value == null ? '' : o.value) : (current ? current.label : '');
+  return `<label class="picker" id="${id}"><span class="label">${o.label}${o.required ? ' *' : ''}</span>
+    <input class="field picker-input" value="${esc(shown)}" placeholder="${esc(o.hint || 'พิมพ์ไม่กี่ตัวเพื่อค้นหา')}"
+      autocomplete="off" ${o.allowNew ? `name="${o.name}" ${o.required ? 'required' : ''}` : ''}
+      oninput="pickerType('${id}')" onfocus="pickerType('${id}')" onkeydown="pickerKey(event,'${id}')" onblur="pickerBlur('${id}')">
+    ${o.allowNew ? '' : `<input type="hidden" name="${o.name}" value="${esc(o.value == null ? '' : o.value)}" ${o.required ? 'required' : ''}>`}
+    <div class="picker-list" hidden></div></label>`;
+}
+
+function pickerOf(id) { return { box: document.getElementById(id), state: PICKERS[id] }; }
+
+/** วาดรายการที่ใกล้เคียงคำที่พิมพ์ */
+function pickerType(id) {
+  const { box, state } = pickerOf(id);
+  if (!box || !state) return;
+  const q = box.querySelector('.picker-input').value;
+  const list = box.querySelector('.picker-list');
+  const hits = searchRank(state.items, q, x => [x.label, x.sub, x.extra].filter(Boolean).join(' ')).slice(0, 12);
+  state.hits = hits;
+  state.active = -1;
+  if (!hits.length) {
+    list.innerHTML = state.allowNew
+      ? '<div class="picker-empty">ไม่มีในรายการ — พิมพ์ชื่อใหม่ได้เลย</div>'
+      : '<div class="picker-empty">ไม่พบรายการที่ตรง</div>';
+  } else {
+    list.innerHTML = hits.map((x, i) => `<button type="button" class="picker-item" data-i="${i}"
+      onmousedown="event.preventDefault();pickerPick('${id}',${i})">
+      <span class="picker-main">${esc(x.label)}</span>${x.sub ? `<span class="picker-sub">${esc(x.sub)}</span>` : ''}</button>`).join('');
+  }
+  list.hidden = false;
+}
+
+function pickerPick(id, i) {
+  const { box, state } = pickerOf(id);
+  if (!box || !state) return;
+  const hit = (state.hits || [])[i];
+  if (!hit) return;
+  const input = box.querySelector('.picker-input');
+  input.value = state.allowNew ? hit.value : hit.label;
+  const hidden = box.querySelector('input[type="hidden"]');
+  if (hidden) hidden.value = hit.value;
+  box.querySelector('.picker-list').hidden = true;
+  if (state.onPick && window[state.onPick]) window[state.onPick](hit.value);
+}
+
+/** ลูกศรขึ้น/ลง + Enter เลือก · Esc ปิด */
+function pickerKey(e, id) {
+  const { box, state } = pickerOf(id);
+  if (!box || !state) return;
+  const list = box.querySelector('.picker-list');
+  const n = (state.hits || []).length;
+  if (e.key === 'Escape') { list.hidden = true; return; }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (list.hidden) { pickerType(id); return; }
+    if (!n) return;
+    e.preventDefault();
+    state.active = (state.active + (e.key === 'ArrowDown' ? 1 : n - 1) + (state.active < 0 && e.key === 'ArrowUp' ? 1 : 0)) % n;
+    Array.from(list.children).forEach((el, i) => el.classList.toggle('is-active', i === state.active));
+    const el = list.children[state.active];
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+    return;
+  }
+  if (e.key === 'Enter' && !list.hidden && state.active >= 0) { e.preventDefault(); pickerPick(id, state.active); }
+}
+
+/** ออกจากช่อง — ถ้าเป็นแบบต้องเลือกจากรายการ แต่พิมพ์ค้างไว้ไม่ตรงอะไรเลย ให้คืนค่าเดิม */
+function pickerBlur(id) {
+  const { box, state } = pickerOf(id);
+  if (!box || !state) return;
+  setTimeout(() => {
+    const list = box.querySelector('.picker-list');
+    if (list) list.hidden = true;
+    if (state.allowNew) return;
+    const hidden = box.querySelector('input[type="hidden"]');
+    const input = box.querySelector('.picker-input');
+    const cur = state.items.find(x => String(x.value) === String(hidden.value));
+    input.value = cur ? cur.label : '';
+  }, 120);
+}
+
 /** ตัดค่าวันที่ให้เหลือ yyyy-MM-dd ไม่ว่าจะรับมาเป็นข้อความหรือ Date */
 function dOnly(value) {
   if (!value) return '';
@@ -577,12 +731,9 @@ function renderLogin(message, names) {
     </div>
     ${message ? `<p class="auth-err">${esc(message)}</p>` : ''}
     ${names
-      ? `<label><span class="label">คุณคือใคร *</span>
-          <input name="name" class="field" required autofocus autocomplete="name" minlength="2" maxlength="60"
-                 placeholder="พิมพ์ชื่อของคุณ" list="dl-login-name">
-          <datalist id="dl-login-name">${names.map(n => `<option value="${esc(n)}"></option>`).join('')}</datalist>
-        </label>
-        <p class="hint">ใช้ชื่อเดิมทุกครั้ง ระบบจะได้รวมงานของคุณไว้ที่เดียวกันในหน้า “งานของฉัน”</p>`
+      ? pickerField({ name: 'name', label: 'คุณคือใคร', required: true, allowNew: true,
+          items: names.map(n => ({ value: n, label: n })), hint: 'พิมพ์ไม่กี่ตัวเพื่อค้นหาชื่อ' })
+        + `<p class="hint">ใช้ชื่อเดิมทุกครั้ง ระบบจะได้รวมงานของคุณไว้ที่เดียวกันในหน้า “งานของฉัน”</p>`
       : `<label><span class="label">รหัสผ่านของทีม *</span><input name="password" type="password" class="field" required autocomplete="current-password" autofocus></label>`}
     <button class="btn btn-primary btn-block">${names ? 'เข้าใช้งาน' : 'ถัดไป'}</button>
     <p class="hint" style="text-align:center">ระบบจะจำอุปกรณ์นี้ไว้ 30 วัน</p>
@@ -669,16 +820,33 @@ function inputField(name, label, value, type, required) {
   return `<label><span class="label">${label}${required ? ' *' : ''}</span><input name="${name}" type="${type || 'text'}" value="${esc(v)}" class="field" ${required ? 'required' : ''}></label>`;
 }
 
+/** ช่องพิมพ์หลายบรรทัด — กด Enter ขึ้นบรรทัดใหม่ได้ ไม่ใช่การกดบันทึก */
+function textField(name, label, value, rows, required, hint) {
+  return `<label><span class="label">${label}${required ? ' *' : ''}</span>
+    <textarea name="${name}" class="field" rows="${rows || 2}" ${required ? 'required' : ''}
+      placeholder="${esc(hint || '')}">${esc(value == null ? '' : value)}</textarea></label>`;
+}
+
 function selectField(name, label, options, value, required) {
   return `<label><span class="label">${label}${required ? ' *' : ''}</span><select name="${name}" class="field" ${required ? 'required' : ''}>${options.map(x => `<option value="${esc(x)}" ${x === value ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>`;
 }
 
-/** ช่องเลือก + พิมพ์เองได้ (เลือกจากรายการเดิม หรือพิมพ์ชื่อใหม่ลงไปได้เลย) */
-function comboField(name, label, options, value, required, hint) {
-  const id = 'dl-' + name;
-  return `<label><span class="label">${label}${required ? ' *' : ''}</span>
-    <input name="${name}" list="${id}" value="${esc(value == null ? '' : value)}" class="field" ${required ? 'required' : ''} autocomplete="off" placeholder="${esc(hint || '')}">
-    <datalist id="${id}">${options.filter(Boolean).map(x => `<option value="${esc(x)}"></option>`).join('')}</datalist></label>`;
+/** รายชื่อแผนกที่เคยใช้จริง — ดึงจากข้อมูลลูกค้าและงานขาย ไม่ต้องตั้งค่าล่วงหน้า */
+function departmentNames() {
+  const seen = {};
+  S.customers.forEach(c => { const d = String(c.Department || '').trim(); if (d) seen[d] = true; });
+  S.opportunities.forEach(o => { const d = String(o.Requester_Department || '').trim(); if (d) seen[d] = true; });
+  return Object.keys(seen).sort((a, b) => a.localeCompare(b, 'th'));
+}
+
+/** ลูกค้าในรูปแบบที่ช่องค้นหาใช้ — ค้นด้วยชื่อบริษัท ผู้ติดต่อ แผนก หรือเบอร์โทรก็ได้ */
+function customerItems() {
+  return S.customers.map(c => ({
+    value: c.Customer_ID,
+    label: c.Company_Name,
+    sub: [c.Contact_Name, c.Department, c.Phone].filter(Boolean).join(' · '),
+    extra: [c.Email, c.Address].filter(Boolean).join(' ')
+  }));
 }
 
 function customerOptions(selected) {
@@ -850,15 +1018,16 @@ function openStatus(status) {
 /* ---------------------------------------------------------------- รายการงาน */
 function filteredRows() {
   const f = S.filter;
-  const q = String(f.query || '').trim().toLowerCase();
-  return S.rows.filter(o => {
+  const base = S.rows.filter(o => {
     if (f.status && o.Status !== f.status) return false;
     if (f.owner && o.Owner !== f.owner) return false;
     if (f.priority && o.Priority !== f.priority) return false;
-    if (!q) return true;
-    return [o.Opportunity_ID, o.Project_Name, o.Quotation_No, o.Customer.Company_Name, o.Requester_Name, o.Requester_Phone]
-      .join(' ').toLowerCase().indexOf(q) !== -1;
+    return true;
   });
+  return searchRank(base, f.query, o => [
+    o.Opportunity_ID, o.Project_Name, o.Quotation_No, o.Customer.Company_Name, o.Customer.Department,
+    o.Site_Location, o.Work_Type, o.Owner, o.Requester_Name, o.Requester_Department, o.Requester_Phone
+  ].filter(Boolean).join(' '));
 }
 
 function viewList() {
@@ -866,7 +1035,7 @@ function viewList() {
   const rows = filteredRows();
   $('#app').innerHTML = header('งานขาย', rows.length + ' จาก ' + S.rows.length + ' รายการ') + `<div class="page">
     <div class="stack">
-      <input id="q" class="field" value="${esc(f.query)}" placeholder="ค้นหา งาน / บริษัท / โทร / เลขที่ QT" oninput="onSearch(this.value)" autocomplete="off">
+      <input id="q" class="field" value="${esc(f.query)}" placeholder="ค้นหา งาน / บริษัท / แผนก / ผู้รับผิดชอบ / โทร" oninput="onSearch(this.value)" autocomplete="off">
       <div class="grid-3">
         <select class="field field-sm" onchange="setFilter('status',this.value)"><option value="">ทุกสถานะ</option>${S.statuses.map(s => `<option ${f.status === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
         <select class="field field-sm" onchange="setFilter('owner',this.value)"><option value="">ทุกผู้รับผิดชอบ</option>${S.owners.map(s => `<option ${f.owner === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
@@ -955,7 +1124,7 @@ function viewDetail(id) {
       <h2 class="section-title">Timeline${acts.length ? `<span class="count">${acts.length}</span>` : ''}</h2>
       ${acts.length ? `<div class="tl">${acts.map(a => `<div class="tl-item card card-tight stack-sm">
         <div class="row-between"><b>${esc(a.Activity_Type)}</b><span class="hint">${fmtDateTime(a.Activity_Date)}</span></div>
-        <p style="font-size:.88rem">${esc(a.Description)}</p>
+        <p class="pre" style="font-size:.88rem">${esc(a.Description)}</p>
         <div class="hint">โดย ${esc(a.Created_By || '-')}</div>
       </div>`).join('')}</div>` : '<div class="empty">ยังไม่มีกิจกรรม</div>'}
     </section>
@@ -974,8 +1143,8 @@ function viewDetail(id) {
   </div>`;
 }
 
-const detailPair = (label, value) => `<div><div class="hint">${label}</div><div class="meta-strong">${esc(value || '-')}</div></div>`;
-const detailRow = (label, value) => `<p style="font-size:.88rem"><b>${label}:</b> ${esc(value == null || value === '' ? '-' : value)}</p>`;
+const detailPair = (label, value) => `<div><div class="hint">${label}</div><div class="meta-strong pre">${esc(value || '-')}</div></div>`;
+const detailRow = (label, value) => `<p class="pre" style="font-size:.88rem"><b>${label}:</b> ${esc(value == null || value === '' ? '-' : value)}</p>`;
 
 function editOpp(id) {
   const o = S.byId.get(id);
@@ -995,7 +1164,8 @@ function viewRfq(o) {
     <section class="card stack">
       <h2>ข้อมูลหลัก</h2>
       ${editing ? '' : `<button type="button" class="btn btn-outline btn-block" onclick="reuseForm()">${I.history}ดึงข้อมูลจากงานเก่ามาใช้</button>`}
-      <label><span class="label">ลูกค้า *</span><select name="Customer_ID" class="field" required onchange="onCustomerPick(this.value)">${customerOptions(o.Customer_ID)}</select></label>
+      ${pickerField({ name: 'Customer_ID', label: 'ลูกค้า', value: o.Customer_ID, required: true,
+        items: customerItems(), hint: 'พิมพ์ชื่อบริษัท แผนก หรือเบอร์โทร', onPick: 'onCustomerPick' })}
       <div id="reuseHint">${editing ? '' : reuseHint(o.Customer_ID)}</div>
       ${inputField('Project_Name', 'ชื่อโครงการ', o.Project_Name, 'text', true)}
       ${inputField('Site_Location', 'สถานที่หน้างาน', o.Site_Location)}
@@ -1009,7 +1179,8 @@ function viewRfq(o) {
         ${selectField('Priority', 'ความสำคัญ', S.priorities, o.Priority || 'Normal')}
         ${inputField('Due_Date', 'ครบกำหนด', o.Due_Date, 'date')}
       </div>
-      ${comboField('Owner', 'ผู้รับผิดชอบ', S.owners, o.Owner || myName(), true, 'เลือกจากรายชื่อ หรือพิมพ์ชื่อใหม่')}
+      ${pickerField({ name: 'Owner', label: 'ผู้รับผิดชอบ', value: o.Owner || myName(), required: true, allowNew: true,
+        items: S.owners.map(n => ({ value: n, label: n })), hint: 'พิมพ์ไม่กี่ตัวเพื่อค้นหา หรือพิมพ์ชื่อใหม่' })}
       <div class="grid-2">
         ${inputField('Estimated_Value', 'มูลค่าคาดการณ์', o.Estimated_Value, 'number')}
         ${inputField('Quotation_No', 'เลขที่ใบเสนอราคา', o.Quotation_No)}
@@ -1019,9 +1190,9 @@ function viewRfq(o) {
 
     <section class="card stack">
       <h2>ติดตามงาน</h2>
-      ${inputField('Next_Action', 'Next Action', o.Next_Action, 'text', true)}
+      ${textField('Next_Action', 'Next Action', o.Next_Action, 3, true, 'กด Enter ขึ้นบรรทัดใหม่ได้')}
       ${inputField('Next_Action_Date', 'วันที่ติดตาม', o.Next_Action_Date, 'date', true)}
-      <label><span class="label">หมายเหตุ</span><textarea name="Remark" class="field" rows="2">${esc(o.Remark)}</textarea></label>
+      ${textField('Remark', 'หมายเหตุ', o.Remark, 3)}
     </section>
 
     <button class="btn btn-primary btn-block">${editing ? 'บันทึกการแก้ไข' : 'สร้าง RFQ'}</button>
@@ -1061,9 +1232,8 @@ function reuseForm(customerId) {
 }
 
 function reuseListHtml(cid, query) {
-  const q = String(query || '').trim().toLowerCase();
-  let rows = cid ? customerJobs(cid) : S.rows;
-  if (q) rows = rows.filter(o => [o.Opportunity_ID, o.Project_Name, o.Customer.Company_Name, o.Site_Location].join(' ').toLowerCase().indexOf(q) !== -1);
+  let rows = searchRank(cid ? customerJobs(cid) : S.rows, query,
+    o => [o.Opportunity_ID, o.Project_Name, o.Customer.Company_Name, o.Site_Location, o.Work_Type].filter(Boolean).join(' '));
   rows = rows.slice(0, 40);
   if (!rows.length) return '<div class="empty">ไม่พบงานเก่า</div>';
   return rows.map(o => `<button type="button" class="card card-btn stack-sm" onclick="applyReuse('${esc(o.Opportunity_ID)}')">
@@ -1102,8 +1272,14 @@ function applyReuse(id) {
 
 async function saveOpp(e, id) {
   e.preventDefault();
-  lockForm(e, true);
   const raw = Object.fromEntries(new FormData(e.target));
+  // ช่องลูกค้าเป็นช่องค้นหา ค่าจริงอยู่ใน input ที่ซ่อนไว้ ซึ่งเบราว์เซอร์ไม่ตรวจ required ให้
+  if (!String(raw.Customer_ID || '').trim()) {
+    const box = e.target.querySelector('.picker .picker-input');
+    if (box) box.focus();
+    return toast('กรุณาเลือกลูกค้าจากรายการ');
+  }
+  lockForm(e, true);
   if (id) raw.Opportunity_ID = id;
   const r = await post('saveOpportunity', raw);
   if (!r.success) { lockForm(e, false); return toast(r.message); }
@@ -1189,7 +1365,7 @@ async function moveMaster(type, name, dir) {
 function viewCustomers() {
   $('#app').innerHTML = header('ลูกค้า', S.customers.length + ' รายการ') + `<div class="page">
     <div class="stack">
-      <input id="cq" class="field" value="${esc(S.customerQuery)}" placeholder="ค้นหาบริษัท / ผู้ติดต่อ / เบอร์โทร" oninput="onCustomerSearch(this.value)" autocomplete="off">
+      <input id="cq" class="field" value="${esc(S.customerQuery)}" placeholder="ค้นหา บริษัท / ผู้ติดต่อ / แผนก / เบอร์โทร" oninput="onCustomerSearch(this.value)" autocomplete="off">
       <button type="button" class="btn btn-primary btn-block" onclick="customerForm()">${I.plus}เพิ่มลูกค้า</button>
     </div>
     <div id="clist" class="stack">${customerRowsHtml()}</div>
@@ -1197,14 +1373,14 @@ function viewCustomers() {
 }
 
 function customerRowsHtml() {
-  const q = String(S.customerQuery || '').trim().toLowerCase();
-  const rows = q ? S.customers.filter(c => [c.Company_Name, c.Contact_Name, c.Phone, c.Email].join(' ').toLowerCase().indexOf(q) !== -1) : S.customers;
+  const rows = searchRank(S.customers, S.customerQuery,
+    c => [c.Company_Name, c.Contact_Name, c.Department, c.Phone, c.Email, c.Address].filter(Boolean).join(' '));
   if (!rows.length) return '<div class="empty">ไม่พบลูกค้า</div>';
   return rows.map(c => {
     const jobs = S.rows.filter(o => o.Customer_ID === c.Customer_ID).length;
     return `<button type="button" class="card card-btn stack-sm" onclick="customerForm('${esc(c.Customer_ID)}')">
       <div class="row-between"><strong class="grow truncate">${esc(c.Company_Name)}</strong>${jobs ? `<span class="badge tone-slate">${jobs} งาน</span>` : ''}</div>
-      <div class="meta">${esc(c.Contact_Name || '-')} · ${esc(c.Phone || '-')}</div>
+      <div class="meta">${esc(c.Contact_Name || '-')}${c.Department ? ' · ' + esc(c.Department) : ''} · ${esc(c.Phone || '-')}</div>
     </button>`;
   }).join('');
 }
@@ -1235,7 +1411,7 @@ function statusForm(id) {
     ${selectField('Status', 'สถานะใหม่', S.statuses, o.Status, true)}
     ${inputField('Quotation_Amount', 'มูลค่าใบเสนอราคา / Winning Amount', o.Quotation_Amount, 'number')}
     <label><span class="label">เหตุผลปิดงาน</span><select name="Close_Reason" class="field"><option value="">เลือกเหตุผล</option>${S.closeReasons.map(x => `<option>${esc(x)}</option>`).join('')}</select></label>
-    <label><span class="label">หมายเหตุ</span><textarea name="Remark" class="field" rows="2"></textarea></label>
+    ${textField('Remark', 'หมายเหตุ', '', 3)}
     <button class="btn btn-primary btn-block">ยืนยัน</button>
   </form>`);
 }
@@ -1255,9 +1431,9 @@ function activityForm(id) {
   modal(`<form class="stack" onsubmit="submitActivity(event,'${esc(id)}')">
     ${modalHead('เพิ่ม Activity')}
     ${selectField('Activity_Type', 'ประเภท', S.activityTypes, 'Note', true)}
-    <label><span class="label">รายละเอียด *</span><textarea name="Description" required class="field" rows="3"></textarea></label>
+    ${textField('Description', 'รายละเอียด', '', 4, true, 'กด Enter ขึ้นบรรทัดใหม่ได้')}
     ${inputField('Activity_Date', 'วันที่/เวลา', nowLocalInput(), 'datetime-local')}
-    ${inputField('Next_Action', 'Next Action')}
+    ${textField('Next_Action', 'Next Action', '', 3)}
     ${inputField('Next_Action_Date', 'วันที่ติดตาม', '', 'date')}
     <div class="fieldset stack">
       <p class="label" style="margin:0">แนบรูป/เอกสารไปพร้อมกัน (ไม่บังคับ)</p>
@@ -1337,12 +1513,13 @@ function customerForm(id) {
     ${modalHead(id ? 'แก้ไขลูกค้า' : 'เพิ่มลูกค้า')}
     ${inputField('Company_Name', 'บริษัท', c.Company_Name, 'text', true)}
     ${inputField('Contact_Name', 'ผู้ติดต่อ', c.Contact_Name)}
-    ${inputField('Department', 'แผนก', c.Department)}
+    ${pickerField({ name: 'Department', label: 'แผนก', value: c.Department, allowNew: true,
+      items: departmentNames().map(n => ({ value: n, label: n })), hint: 'พิมพ์ไม่กี่ตัวเพื่อค้นหา หรือพิมพ์แผนกใหม่' })}
     ${inputField('Phone', 'เบอร์โทรศัพท์', c.Phone, 'tel')}
     ${inputField('Email', 'Email', c.Email, 'email')}
-    <label><span class="label">ที่อยู่</span><textarea name="Address" class="field" rows="2">${esc(c.Address)}</textarea></label>
+    ${textField('Address', 'ที่อยู่', c.Address, 3)}
     ${inputField('Map_URL', 'Google Maps URL', c.Map_URL, 'url')}
-    <label><span class="label">หมายเหตุ</span><textarea name="Remark" class="field" rows="2">${esc(c.Remark)}</textarea></label>
+    ${textField('Remark', 'หมายเหตุ', c.Remark, 3)}
     <button class="btn btn-primary btn-block">บันทึก</button>
   </form>`);
 }
