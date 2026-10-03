@@ -817,7 +817,8 @@ function ageBadge(o) {
   return `<span class="badge ${n >= S.sla.overdue ? 'tone-red' : 'tone-amber'}">รอเสนอราคา ${n} วัน</span>`;
 }
 
-function oppCard(o) {
+function oppCard(o, query) {
+  const why = whyMatch(o, query);
   return `<button type="button" onclick="go('detail',{id:'${esc(o.Opportunity_ID)}'})" class="card card-btn stack-sm">
     <div class="row-between" style="align-items:flex-start">
       <strong class="grow">${esc(o.Project_Name)}</strong>
@@ -827,6 +828,7 @@ function oppCard(o) {
     </div>
     <div class="meta-strong truncate">${esc(o.Customer.Company_Name || '')}</div>
     <div class="meta">${esc(o.Opportunity_ID)} · ${esc(o.Owner)} · ติดตาม ${fmtDate(o.Next_Action_Date)}</div>
+    ${why ? `<div class="why">เจอใน ${esc(why.label)}: ${esc(why.snippet)}</div>` : ''}
   </button>`;
 }
 
@@ -835,7 +837,7 @@ function oppSection(title, items, empty, kind) {
   const countCls = kind === 'danger' ? 'is-danger' : kind === 'warn' ? 'is-warn' : '';
   return `<section class="stack">
     <h2 class="section-title ${items.length ? cls : ''}">${esc(title)}${items.length ? `<span class="count ${countCls}">${items.length}</span>` : ''}</h2>
-    ${items.length ? items.map(oppCard).join('') : `<div class="empty">${esc(empty)}</div>`}
+    ${items.length ? items.map(x => oppCard(x)).join('') : `<div class="empty">${esc(empty)}</div>`}
   </section>`;
 }
 
@@ -1042,6 +1044,27 @@ function openStatus(status) {
 }
 
 /* ---------------------------------------------------------------- รายการงาน */
+/**
+ * ช่องที่ใช้ค้นในรายการงานขาย เรียงจากสำคัญไปรอง
+ * shown = ข้อความนี้เห็นอยู่บนการ์ดแล้ว ไม่ต้องบอกซ้ำว่า "เจอใน..."
+ * ช่องที่ไม่ shown ถ้าเป็นตัวที่ทำให้แถวนี้ติดขึ้นมา จะมีบรรทัดบอกให้เห็นว่าเจอคำในช่องไหน
+ */
+const OPP_FIELDS = [
+  { label: 'ชื่องาน', shown: true, get: o => o.Project_Name },
+  { label: 'บริษัท', shown: true, get: o => o.Customer.Company_Name },
+  { label: 'เลขที่งาน', shown: true, get: o => o.Opportunity_ID },
+  { label: 'ผู้รับผิดชอบ', shown: true, get: o => o.Owner },
+  { label: 'เลขที่ใบเสนอราคา', get: o => o.Quotation_No },
+  { label: 'ประเภทงาน', get: o => o.Work_Type },
+  { label: 'สถานที่หน้างาน', get: o => o.Site_Location },
+  { label: 'ผู้ขอราคา', get: o => o.Requester_Name },
+  { label: 'แผนก', get: o => o.Requester_Department || o.Customer.Department },
+  { label: 'เบอร์โทร', get: o => o.Requester_Phone || o.Customer.Phone },
+  { label: 'รายละเอียด', get: o => o.Description },
+  { label: 'หมายเหตุ', get: o => o.Remark },
+  { label: 'Next Action', get: o => o.Next_Action }
+];
+
 function filteredRows() {
   const f = S.filter;
   const base = S.rows.filter(o => {
@@ -1050,11 +1073,41 @@ function filteredRows() {
     if (f.priority && o.Priority !== f.priority) return false;
     return true;
   });
-  return searchRank(base, f.query, o => [
-    o.Project_Name, o.Customer.Company_Name, o.Opportunity_ID, o.Quotation_No, o.Owner,
-    o.Work_Type, o.Site_Location, o.Description, o.Requester_Name,
-    o.Requester_Department, o.Customer.Department, o.Requester_Phone, o.Next_Action, o.Remark
-  ]);
+  return searchRank(base, f.query, o => OPP_FIELDS.map(x => x.get(o)));
+}
+
+/** ตัดข้อความรอบๆ จุดที่เจอ ให้พออ่านรู้เรื่องโดยไม่ยาวเกินการ์ด */
+function snippetAt(text, pos, len) {
+  const from = Math.max(0, pos - 12);
+  const to = Math.min(text.length, pos + len + 28);
+  return (from > 0 ? '…' : '') + text.slice(from, to).replace(/\s+/g, ' ').trim() + (to < text.length ? '…' : '');
+}
+
+/**
+ * แถวนี้ติดขึ้นมาเพราะเจอคำในช่องไหน
+ * คืน null ถ้าเจอในช่องที่เห็นอยู่บนการ์ดแล้ว (ไม่ต้องอธิบายซ้ำ)
+ */
+function whyMatch(o, query) {
+  const q = String(query == null ? '' : query).trim().toLowerCase();
+  if (!q) return null;
+  const words = q.split(/\s+/).filter(Boolean);
+  let best = null;
+  for (let i = 0; i < OPP_FIELDS.length; i++) {
+    const raw = String(OPP_FIELDS[i].get(o) == null ? '' : OPP_FIELDS[i].get(o));
+    if (!raw) continue;
+    const t = raw.toLowerCase();
+    let total = 0, pos = -1;
+    for (let w = 0; w < words.length; w++) {
+      const sc = fieldScore(t, words[w]);
+      if (!sc) continue;
+      total += sc;
+      const p = t.indexOf(words[w]);
+      if (pos < 0 || p < pos) pos = p;
+    }
+    if (total && (!best || total > best.total)) best = { fi: i, total: total, pos: pos, raw: raw, len: words[0].length };
+  }
+  if (!best || OPP_FIELDS[best.fi].shown) return null;
+  return { label: OPP_FIELDS[best.fi].label, snippet: snippetAt(best.raw, best.pos, best.len) };
 }
 
 function viewList() {
@@ -1075,7 +1128,11 @@ function viewList() {
 }
 
 function listRowsHtml(rows) {
-  return rows.length ? rows.map(oppCard).join('') : '<div class="empty">ไม่พบงานขายที่ตรงกับเงื่อนไข</div>';
+  const q = S.filter.query;
+  if (rows.length) return rows.map(o => oppCard(o, q)).join('');
+  return '<div class="empty">' + (String(q || '').trim()
+    ? 'ไม่พบงานขายที่มีคำว่า “' + esc(String(q).trim()) + '”'
+    : 'ไม่พบงานขายที่ตรงกับเงื่อนไข') + '</div>';
 }
 
 /** ค้นหาแบบพิมพ์ไปเห็นผลไป — วาดใหม่เฉพาะรายการ ช่องพิมพ์จึงไม่เสียโฟกัส */

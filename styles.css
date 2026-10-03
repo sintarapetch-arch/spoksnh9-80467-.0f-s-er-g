@@ -419,6 +419,18 @@ select.field-sm { padding-right: 30px; background-position: right 8px center; }
 .stat .stat-l { margin-top: 2px; font-size: .72rem; color: var(--muted); }
 .stat.is-zero .stat-n { color: var(--faint); }
 
+/* บรรทัดบอกว่าแถวนี้ติดขึ้นมาเพราะเจอคำในช่องไหน (ช่องที่ไม่ได้แสดงบนการ์ด) */
+.why {
+  margin-top: 2px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: var(--brand-50);
+  color: var(--brand-700);
+  font-size: .76rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 /* ข้อความที่ผู้ใช้พิมพ์เอง — คงบรรทัดที่เคาะไว้ และตัดคำยาวไม่ให้ล้นจอ */
 .pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 
