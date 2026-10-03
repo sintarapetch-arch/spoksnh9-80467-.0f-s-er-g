@@ -51,56 +51,82 @@ const CLOSED_ORDER = ['อนุมัติ/ได้งาน', 'ไม่อ�
 const mergeList = (base, extra) => base.concat((extra || []).filter(x => base.indexOf(x) === -1));
 
 /* ---------------------------------------------------------------------------
- * ค้นหาด้วยคีย์เวิร์ดสั้นๆ
+ * ค้นหาด้วยคีย์เวิร์ด
  *
- * พิมพ์ไม่กี่ตัวก็เจอ ไม่ต้องพิมพ์ให้ตรงเป๊ะหรือตรงตั้งแต่ตัวแรก
- *   "ทดสอบ"      เจอ "บริษัท ทดสอบ จำกัด"      (อยู่กลางข้อความก็เจอ)
- *   "ทสบ"        เจอ "บริษัท ทดสอบ จำกัด"      (พิมพ์ย่อ เอาเฉพาะตัวอักษรที่จำได้)
- *   "ทด จำกัด"   เจอ "บริษัท ทดสอบ จำกัด"      (หลายคำ เจอครบทุกคำจึงนับว่าตรง)
- * ยิ่งตรงมากคะแนนยิ่งสูง แล้วเอาคะแนนไปเรียงลำดับผลลัพธ์
+ * ทำงานเหมือนช่องค้นหาทั่วไป — คำที่พิมพ์ต้อง "มีอยู่จริง" ในข้อมูล
+ *   "หัว"        เจอเฉพาะรายการที่มีคำว่า หัว อยู่จริง เช่น หัวฉีด / หัวจ่าย
+ *   "fire pump"  ต้องเจอทั้ง fire และ pump (คนละช่องก็ได้)
+ *   "hoya"       เจอจากชื่อบริษัท
+ *
+ * สำคัญ: เทียบทีละช่อง (ชื่องาน / บริษัท / ผู้รับผิดชอบ / ...) ไม่เอามาต่อกันเป็นก้อนเดียว
+ * เพราะถ้าต่อเป็นก้อนยาว การค้นจะไปตรงกับข้อความที่คาบเกี่ยวระหว่างช่อง ซึ่งไม่ใช่สิ่งที่คนหา
+ *
+ * ลำดับผลลัพธ์: ตรงทั้งช่อง > ขึ้นต้นช่อง > ขึ้นต้นคำ > อยู่กลางคำ
+ * และช่องที่สำคัญกว่า (ชื่องาน ชื่อบริษัท) ได้คะแนนมากกว่าช่องท้ายๆ
  * ------------------------------------------------------------------------- */
 
-/** คะแนนของคำเดียว เทียบกับข้อความที่แปลงเป็นตัวพิมพ์เล็กแล้ว */
-function wordScore(text, word) {
+const WORD_EDGE = ' -_/()[],.·:;|#';
+
+/** คะแนนของคำค้น 1 คำ ในข้อความ 1 ช่อง (0 = ไม่มีคำนี้อยู่เลย) */
+function fieldScore(text, word) {
+  if (!text) return 0;
   const i = text.indexOf(word);
-  if (i === 0) return 100;                       // ขึ้นต้นตรง = ตรงที่สุด
-  if (i > 0) return 70 - Math.min(i, 25);        // เจอกลางข้อความ ยิ่งอยู่ต้นยิ่งได้คะแนน
-  // ไม่เจอเป็นก้อน — ลองแบบ "ตัวอักษรเรียงกัน" เผื่อพิมพ์ย่อหรือพิมพ์ตกบางตัว
-  let j = 0, gaps = 0, last = -1;
+  if (i < 0) return 0;
+  if (text.length === word.length) return 1000;                 // ตรงทั้งช่อง
+  if (i === 0) return 600;                                      // ขึ้นต้นช่อง
+  if (WORD_EDGE.indexOf(text.charAt(i - 1)) !== -1) return 400;  // ขึ้นต้นคำ
+  return Math.max(60, 250 - i);                                 // อยู่กลางคำ ยิ่งต้นยิ่งได้คะแนน
+}
+
+/**
+ * ตรงแบบพิมพ์ย่อ — ใช้เป็นตัวช่วยเฉพาะตอนค้นแบบปกติไม่เจออะไรเลย
+ * ตัวอักษรต้องเรียงกันและอยู่ชิดกันพอสมควร ("ทสบ" เจอ "ทดสอบ" แต่ไม่ลามไปทั้งประโยค)
+ */
+function abbrScore(text, word) {
+  if (!text || word.length < 2) return 0;
+  let j = 0, first = -1, last = -1;
   for (let k = 0; k < text.length && j < word.length; k++) {
-    if (text[k] !== word[j]) continue;
-    if (last >= 0 && k - last > 1) gaps++;
+    if (text.charAt(k) !== word.charAt(j)) continue;
+    if (first < 0) first = k;
     last = k; j++;
   }
-  if (j < word.length) return 0;                 // มีตัวที่หาไม่เจอ = ไม่ตรง
-  return Math.max(1, 40 - gaps);
+  if (j < word.length) return 0;
+  const span = last - first + 1;
+  if (span > word.length * 3) return 0;      // กระจายเกินไป = ไม่ใช่คำย่อ
+  return Math.max(10, 90 - (span - word.length) * 10);
 }
 
-/** คะแนนรวมของข้อความหนึ่งก้อน เทียบกับคำค้น (0 = ไม่ตรง) */
-function matchScore(text, query) {
-  const q = String(query == null ? '' : query).trim().toLowerCase();
-  if (!q) return 1;
-  const t = String(text == null ? '' : text).toLowerCase();
-  if (!t) return 0;
-  const words = q.split(/\s+/).filter(Boolean);
+/** คะแนนรวมของ 1 แถว — ต้องเจอครบทุกคำที่พิมพ์ ไม่งั้นคืน 0 */
+function rowScore(fields, words, scorer) {
   let total = 0;
-  for (let i = 0; i < words.length; i++) {
-    const sc = wordScore(t, words[i]);
-    if (!sc) return 0;                           // ต้องเจอครบทุกคำ
-    total += sc;
+  for (let w = 0; w < words.length; w++) {
+    let best = 0;
+    for (let i = 0; i < fields.length; i++) {
+      const sc = scorer(fields[i], words[w]) * (1 - Math.min(i, 15) * 0.02);
+      if (sc > best) best = sc;
+    }
+    if (!best) return 0;
+    total += best;
   }
-  return total / words.length;
+  return total;
 }
 
-/** กรอง + เรียงรายการตามความใกล้เคียง — fields = ฟังก์ชันดึงข้อความที่ใช้ค้นจากแต่ละแถว */
-function searchRank(rows, query, fields) {
-  const q = String(query == null ? '' : query).trim();
+/**
+ * กรอง + เรียงตามความตรง
+ * fieldsOf(row) ต้องคืน "อาร์เรย์ของข้อความ" เรียงจากช่องสำคัญไปช่องรอง
+ */
+function searchRank(rows, query, fieldsOf) {
+  const q = String(query == null ? '' : query).trim().toLowerCase();
   if (!q) return rows.slice();
-  return rows
-    .map(r => ({ r: r, sc: matchScore(fields(r), q) }))
-    .filter(x => x.sc > 0)
-    .sort((a, b) => b.sc - a.sc)
-    .map(x => x.r);
+  const words = q.split(/\s+/).filter(Boolean);
+  const prep = rows.map(r => ({
+    r: r,
+    f: [].concat(fieldsOf(r)).map(x => String(x == null ? '' : x).toLowerCase())
+  }));
+  const run = scorer => prep.map(x => ({ r: x.r, sc: rowScore(x.f, words, scorer) })).filter(x => x.sc > 0);
+  let hit = run(fieldScore);
+  if (!hit.length) hit = run(abbrScore);   // ไม่เจอแบบปกติ ค่อยลองแบบพิมพ์ย่อ
+  return hit.sort((a, b) => b.sc - a.sc).map(x => x.r);
 }
 
 /* ---------------------------------------------------- ช่องเลือกแบบค้นหาได้
@@ -141,7 +167,7 @@ function pickerType(id) {
   if (!box || !state) return;
   const q = box.querySelector('.picker-input').value;
   const list = box.querySelector('.picker-list');
-  const hits = searchRank(state.items, q, x => [x.label, x.sub, x.extra].filter(Boolean).join(' ')).slice(0, 12);
+  const hits = searchRank(state.items, q, x => [x.label, x.sub, x.extra]).slice(0, 12);
   state.hits = hits;
   state.active = -1;
   if (!hits.length) {
@@ -1025,9 +1051,10 @@ function filteredRows() {
     return true;
   });
   return searchRank(base, f.query, o => [
-    o.Opportunity_ID, o.Project_Name, o.Quotation_No, o.Customer.Company_Name, o.Customer.Department,
-    o.Site_Location, o.Work_Type, o.Owner, o.Requester_Name, o.Requester_Department, o.Requester_Phone
-  ].filter(Boolean).join(' '));
+    o.Project_Name, o.Customer.Company_Name, o.Opportunity_ID, o.Quotation_No, o.Owner,
+    o.Work_Type, o.Site_Location, o.Description, o.Requester_Name,
+    o.Requester_Department, o.Customer.Department, o.Requester_Phone, o.Next_Action, o.Remark
+  ]);
 }
 
 function viewList() {
@@ -1233,7 +1260,7 @@ function reuseForm(customerId) {
 
 function reuseListHtml(cid, query) {
   let rows = searchRank(cid ? customerJobs(cid) : S.rows, query,
-    o => [o.Opportunity_ID, o.Project_Name, o.Customer.Company_Name, o.Site_Location, o.Work_Type].filter(Boolean).join(' '));
+    o => [o.Project_Name, o.Customer.Company_Name, o.Opportunity_ID, o.Work_Type, o.Site_Location]);
   rows = rows.slice(0, 40);
   if (!rows.length) return '<div class="empty">ไม่พบงานเก่า</div>';
   return rows.map(o => `<button type="button" class="card card-btn stack-sm" onclick="applyReuse('${esc(o.Opportunity_ID)}')">
@@ -1374,7 +1401,7 @@ function viewCustomers() {
 
 function customerRowsHtml() {
   const rows = searchRank(S.customers, S.customerQuery,
-    c => [c.Company_Name, c.Contact_Name, c.Department, c.Phone, c.Email, c.Address].filter(Boolean).join(' '));
+    c => [c.Company_Name, c.Contact_Name, c.Department, c.Phone, c.Email, c.Address]);
   if (!rows.length) return '<div class="empty">ไม่พบลูกค้า</div>';
   return rows.map(c => {
     const jobs = S.rows.filter(o => o.Customer_ID === c.Customer_ID).length;
