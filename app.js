@@ -24,7 +24,7 @@
  * 1. ค่าคงที่ + เครื่องมือช่วย
  * ------------------------------------------------------------------------- */
 const TOKEN_KEY = 'pts_token', NAME_KEY = 'pts_name', SNAP_KEY = 'pts_snapshot_v2', ORDER_KEY = 'pts_status_order';
-const NOTIFY_KEY = 'pts_task_notified', TASK_TOAST_KEY = 'pts_task_toast_day';
+const NOTIFY_KEY = 'pts_task_notified', TASK_TOAST_KEY = 'pts_task_toast_day', PUSH_SIG_KEY = 'pts_push_sig';
 
 const SYNC_FAST_MS = 5000;      // ช่วงที่เพิ่งมีการใช้งาน
 const SYNC_SLOW_MS = 15000;     // เงียบไปสักพัก
@@ -301,6 +301,9 @@ const S = {
   taskScope: 'mine',     // mine = ของฉัน · byme = ฉันมอบหมาย · team = ทั้งทีม
   taskShowDone: false,
   taskBusy: {},
+  pushKey: '',           // กุญแจ VAPID จากหลังบ้าน — มีค่า = ส่งแจ้งเตือนแบบปิดแอปได้
+  pushOn: false,         // เครื่องนี้ลงทะเบียนรับแจ้งเตือนแบบปิดแอปแล้ว
+  pushChecked: false,
   priorities: [], categories: [], activityTypes: [],
   wonStatus: '', voidStatus: '', quoteSentStatus: '',
   sla: { warn: 7, overdue: 15 },
@@ -386,6 +389,7 @@ function applySnapshot(data) {
   ['wonStatus', 'voidStatus', 'quoteSentStatus'].forEach(k => { if (data[k]) S[k] = data[k]; });
   S.editableLists = !!data.editableLists;
   if (Array.isArray(data.tasks)) { S.tasks = data.tasks; S.tasksEnabled = true; }
+  if (typeof data.pushKey === 'string') S.pushKey = data.pushKey;
   if (data.master && typeof data.master === 'object') S.master = data.master;
   // หลังบ้านรุ่นใหม่: รายชื่อสถานะมาจาก Master_Data ที่ผู้ใช้จัดเอง ใช้ตามนั้นเลย
   // หลังบ้านรุ่นเก่า: ยึด 12 สถานะมาตรฐานเป็นหลัก แล้วต่อท้ายด้วยของที่ส่งมาเพิ่ม
@@ -410,7 +414,8 @@ function snapshotForCache() {
     priorities: S.priorities, categories: S.categories, activityTypes: S.activityTypes,
     wonStatus: S.wonStatus, voidStatus: S.voidStatus, quoteSentStatus: S.quoteSentStatus, sla: S.sla,
     master: S.master, editableLists: S.editableLists,
-    tasks: S.tasksEnabled ? S.tasks : undefined
+    tasks: S.tasksEnabled ? S.tasks : undefined,
+    pushKey: S.pushKey
   };
 }
 
@@ -583,7 +588,7 @@ async function refresh(options) {
   const before = S.opportunities.length;
   const changed = applySnapshot(out.data);
   saveCache();
-  setTimeout(checkTaskAlerts, 300);
+  setTimeout(afterSnapshot, 300);
 
   if (!S.ready) { S.ready = true; render(); return true; }
   if (!changed) { renderSync(); return true; }
@@ -813,8 +818,18 @@ async function submitLogin(e) {
   boot();
 }
 
-function logout() {
+async function logout() {
   if (!confirm('ออกจากระบบ?')) return;
+  // เลิกส่งแจ้งเตือน Task ของคนนี้มาที่เครื่องนี้ (รอไม่เกิน 4 วิ ไม่ให้การออกจากระบบค้าง)
+  try {
+    const reg = 'serviceWorker' in navigator && await navigator.serviceWorker.getRegistration();
+    const sub = reg && reg.pushManager && await reg.pushManager.getSubscription();
+    if (sub) {
+      await Promise.race([post('removePushSub', { Endpoint: sub.endpoint }), new Promise(r => setTimeout(r, 4000))]);
+      await sub.unsubscribe();
+    }
+  } catch (e) {}
+  try { localStorage.removeItem(PUSH_SIG_KEY); } catch (e) {}
   clearAuth();
   location.reload();
 }
@@ -1533,6 +1548,70 @@ function registerSW() {
   return navigator.serviceWorker.register('sw.js').catch(() => null);
 }
 
+/** รอให้ service worker พร้อม (สมัครรับแจ้งเตือนได้เฉพาะตอนมันทำงานแล้ว) — ไม่พร้อมใน 10 วิ คืน null */
+async function swReady() {
+  const reg = await registerSW();
+  if (!reg) return null;
+  if (reg.active) return reg;
+  return Promise.race([navigator.serviceWorker.ready, new Promise(r => setTimeout(() => r(null), 10000))]);
+}
+
+function b64uBytes(str) {
+  let b = String(str).replace(/-/g, '+').replace(/_/g, '/');
+  while (b.length % 4) b += '=';
+  return Uint8Array.from(atob(b), c => c.charCodeAt(0));
+}
+
+/**
+ * ลงทะเบียนเครื่องนี้กับหลังบ้าน เพื่อรับแจ้งเตือนแม้ปิดแอป
+ * เรียกตอนกดเปิดการแจ้งเตือน และตอนเปิดแอป (ส่งข้อมูลซ้ำวันละครั้ง เพื่ออัปเดตชื่อเจ้าของเครื่อง)
+ */
+async function ensurePushSub(force) {
+  if (!S.pushKey || !S.tasksEnabled || notifyState() !== 'granted' || !('PushManager' in window)) return false;
+  try {
+    const reg = await swReady();
+    if (!reg || !reg.pushManager) return false;
+    const want = b64uBytes(S.pushKey);
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && sub.options && sub.options.applicationServerKey) {
+      const have = new Uint8Array(sub.options.applicationServerKey);
+      if (have.length !== want.length || have.some((b, i) => b !== want[i])) { await sub.unsubscribe(); sub = null; }   // กุญแจหลังบ้านเปลี่ยน
+    }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: want });
+    const j = sub.toJSON();
+    const sig = j.endpoint + '|' + myName() + '|' + todayStr();
+    let saved = '';
+    try { saved = localStorage.getItem(PUSH_SIG_KEY) || ''; } catch (e) {}
+    if (!force && saved === sig) { S.pushOn = true; return true; }
+    const r = await post('savePushSub', {
+      Endpoint: j.endpoint, P256dh: j.keys.p256dh, Auth: j.keys.auth,
+      Agent: String(navigator.userAgent).slice(0, 200), Origin: location.origin
+    });
+    S.pushOn = !!r.success;
+    if (r.success) { try { localStorage.setItem(PUSH_SIG_KEY, sig); } catch (e) {} }
+    return S.pushOn;
+  } catch (e) { S.pushOn = false; return false; }
+}
+
+/** หลังได้ข้อมูลชุดใหม่ — ตรวจแจ้งเตือน และลงทะเบียนเครื่อง (ครั้งเดียวต่อการเปิดแอป) */
+function afterSnapshot() {
+  checkTaskAlerts();
+  if (S.pushChecked || !S.pushKey || notifyState() !== 'granted') return;
+  S.pushChecked = true;
+  ensurePushSub().then(() => { if (S.view.name === 'tasks') repaint(); });
+}
+
+/** ส่งแจ้งเตือนทดสอบมาที่เครื่องนี้ — หน่วง 8 วินาที ให้ปิดแอปก่อนแล้วดูว่าเด้งจริง */
+async function testPushNow() {
+  if (!(await ensurePushSub(true))) { render(); return toast('ลงทะเบียนเครื่องไม่สำเร็จ ลองใหม่อีกครั้ง'); }
+  const reg = await swReady();
+  const sub = reg && await reg.pushManager.getSubscription();
+  if (!sub) return toast('ลงทะเบียนเครื่องไม่สำเร็จ ลองใหม่อีกครั้ง');
+  toast('กำลังส่ง — ปิดแอปหรือสลับไปแอปอื่นได้เลย จะเด้งในอีกประมาณ 10 วินาที', 'info');
+  const r = await post('testPush', { Endpoint: sub.endpoint, Delay: 8 });
+  if (!r.success) toast(r.message);
+}
+
 async function showNotify(title, body, tag) {
   const opts = { body: body, tag: tag, icon: 'icon-192.png', badge: 'favicon-32.png' };
   try {
@@ -1551,6 +1630,7 @@ async function enableTaskNotify() {
   if (p === 'default') { try { p = await Notification.requestPermission(); } catch (e) { p = 'denied'; } }
   if (p !== 'granted') { render(); return toast('ไม่ได้รับอนุญาตให้แจ้งเตือน'); }
   await showNotify('PTS Sales', 'เปิดการแจ้งเตือน Task แล้ว จะเตือนเมื่อครบกำหนดและเกินกำหนด', 'pts-enabled');
+  await ensurePushSub(true);
   render();
   checkTaskAlerts();
 }
@@ -1627,6 +1707,9 @@ function taskTick() {
 
 function notifyControl() {
   const st = notifyState();
+  if (st === 'granted' && S.pushOn) return `<p class="hint">${I.bell} การแจ้งเตือนเปิดอยู่ — <b>เด้งแม้ปิดแอป</b> เมื่อ Task ของคุณครบกำหนดและเกินกำหนด</p>
+    <button type="button" class="btn btn-soft btn-block" onclick="testPushNow()">${I.bell}ส่งแจ้งเตือนทดสอบ (กดแล้วปิดแอปได้เลย)</button>`;
+  if (st === 'granted' && S.pushKey && 'PushManager' in window) return `<button type="button" class="btn btn-soft btn-block" onclick="enableTaskNotify()">${I.bell}เปิดการแจ้งเตือนแบบปิดแอป</button>`;
   if (st === 'granted') return `<p class="hint">${I.bell} การแจ้งเตือนเปิดอยู่บนเครื่องนี้ — เตือนเมื่อ Task ของคุณครบกำหนดและเกินกำหนด (ขณะเปิดแอปหรือย่อไว้)</p>`;
   if (st === 'denied') return `<p class="hint">การแจ้งเตือนถูกปิดไว้ในเบราว์เซอร์ — เปิดได้ที่ไอคอนหน้าช่องที่อยู่เว็บ → การแจ้งเตือน → อนุญาต</p>`;
   if (st === 'unsupported') return `<p class="hint">เครื่องนี้แจ้งเตือนไม่ได้${isIOS() ? ' — บน iPhone/iPad ให้กดแชร์ → “เพิ่มไปยังหน้าจอโฮม” แล้วเปิดจากไอคอนบนหน้าจอ' : ''} · ดูงานที่ต้องทำได้จากตัวเลขบนเมนู Task</p>`;
