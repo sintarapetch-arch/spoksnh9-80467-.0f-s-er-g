@@ -1707,8 +1707,7 @@ function taskTick() {
 
 function notifyControl() {
   const st = notifyState();
-  if (st === 'granted' && S.pushOn) return `<p class="hint">${I.bell} การแจ้งเตือนเปิดอยู่ — <b>เด้งแม้ปิดแอป</b> เมื่อ Task ของคุณครบกำหนดและเกินกำหนด</p>
-    <button type="button" class="btn btn-soft btn-block" onclick="testPushNow()">${I.bell}ส่งแจ้งเตือนทดสอบ (กดแล้วปิดแอปได้เลย)</button>`;
+  if (st === 'granted' && S.pushOn) return '';   // เปิดครบแล้ว ไม่ต้องแสดงอะไร
   if (st === 'granted' && S.pushKey && 'PushManager' in window) return `<button type="button" class="btn btn-soft btn-block" onclick="enableTaskNotify()">${I.bell}เปิดการแจ้งเตือนแบบปิดแอป</button>`;
   if (st === 'granted') return `<p class="hint">${I.bell} การแจ้งเตือนเปิดอยู่บนเครื่องนี้ — เตือนเมื่อ Task ของคุณครบกำหนดและเกินกำหนด (ขณะเปิดแอปหรือย่อไว้)</p>`;
   if (st === 'denied') return `<p class="hint">การแจ้งเตือนถูกปิดไว้ในเบราว์เซอร์ — เปิดได้ที่ไอคอนหน้าช่องที่อยู่เว็บ → การแจ้งเตือน → อนุญาต</p>`;
