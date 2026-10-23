@@ -24,6 +24,7 @@
  * 1. ค่าคงที่ + เครื่องมือช่วย
  * ------------------------------------------------------------------------- */
 const TOKEN_KEY = 'pts_token', NAME_KEY = 'pts_name', SNAP_KEY = 'pts_snapshot_v2', ORDER_KEY = 'pts_status_order';
+const SEEN_KEY = 'pts_task_seen';
 const NOTIFY_KEY = 'pts_task_notified', TASK_TOAST_KEY = 'pts_task_toast_day', PUSH_SIG_KEY = 'pts_push_sig';
 
 const SYNC_FAST_MS = 5000;      // ช่วงที่เพิ่งมีการใช้งาน
@@ -651,6 +652,7 @@ function applyWrite(out) {
     const i = S.tasks.findIndex(t => t.Task_ID === d.task.Task_ID);
     if (i === -1) S.tasks.push(d.task); else S.tasks[i] = d.task;
     markTaskSeen(d.task);   // งานที่เราเพิ่ง แก้/สร้างเอง ไม่ต้องเด้งเตือนซ้ำในเครื่องนี้
+    markTaskRead(d.task);   // และไม่ต้องขึ้นจุดแดง
   }
   if (d.deletedTaskId) S.tasks = S.tasks.filter(t => t.Task_ID !== d.deletedTaskId);
   if (d.activity && d.activity.Activity_ID) S.activities.unshift(d.activity);
@@ -1546,6 +1548,35 @@ function taskDue(t) {
   return { key: 'later', tone: 'slate', label: fmtDate(d) + at };
 }
 
+/* ---------- จุดแดง: Task ของฉันที่ยังไม่ได้เปิดดู ----------
+ * จำในเครื่องนี้ว่าเปิดดู Task ไหนแล้ว (เทียบกับเวลาแก้ไขล่าสุด)
+ * ถ้ามีคนอื่นแก้ Task ของเรา (เช่นเลื่อนวัน) จุดแดงจะกลับมาอีกครั้ง
+ * เปิดแอปรุ่นนี้ครั้งแรก ถือว่า Task ที่มีอยู่แล้วอ่านแล้วทั้งหมด จะได้ไม่ขึ้นจุดแดงเต็มจอ
+ */
+let seenMap = null;
+const taskStamp = t => String(t.Updated_At || t.Created_At || '');
+function readSeen() {
+  if (seenMap) return seenMap;
+  let raw = null;
+  try { raw = localStorage.getItem(SEEN_KEY); } catch (e) {}
+  if (raw) { try { seenMap = JSON.parse(raw) || {}; } catch (e) { seenMap = {}; } return seenMap; }
+  seenMap = {};
+  S.tasks.forEach(t => { seenMap[t.Task_ID] = taskStamp(t); });
+  writeSeen();
+  return seenMap;
+}
+function writeSeen() {
+  const live = {};
+  S.tasks.forEach(t => { if (seenMap[t.Task_ID] !== undefined) live[t.Task_ID] = seenMap[t.Task_ID]; });   // ตัดของที่ลบไปแล้ว
+  seenMap = live;
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify(seenMap)); } catch (e) {}
+}
+function isTaskUnread(t) {
+  if (isDone(t) || t.Assignee !== myName()) return false;
+  return readSeen()[t.Task_ID] !== taskStamp(t);
+}
+function markTaskRead(t) { readSeen()[t.Task_ID] = taskStamp(t); writeSeen(); }
+
 /** ขั้นของการแจ้งเตือน: '' = ยังไม่ต้องเตือน · due = ครบกำหนด · overdue = เกินกำหนด */
 function taskStage(t) {
   if (isDone(t)) return '';
@@ -1798,7 +1829,7 @@ function taskCard(t) {
   return `<div class="card task-card ${done ? 'is-done' : ''} ${due.key === 'overdue' ? 'is-overdue' : ''}">
     <button type="button" class="task-check" onclick="toggleTask('${id}',${!done})" aria-label="${done ? 'ย้ายกลับเป็นงานค้าง' : 'ทำเสร็จแล้ว'}">${done ? I.check : ''}</button>
     <button type="button" class="task-body" onclick="taskForm('${id}')">
-      <strong class="task-title">${esc(t.Title)}</strong>
+      <strong class="task-title">${isTaskUnread(t) ? '<i class="task-dot" title="ยังไม่ได้เปิดดู"></i>' : ''}${esc(t.Title)}</strong>
       <span class="meta">${esc(t.Assignee)}${by}</span>
       ${opp ? `<span class="meta truncate">งาน: ${esc(opp.Project_Name)}</span>` : ''}
     </button>
@@ -1876,6 +1907,7 @@ function peopleNames() {
 function taskForm(id, preset) {
   const t = id ? S.tasks.find(x => x.Task_ID === id) : Object.assign({ Assignee: myName(), Due_Date: todayStr() }, preset || {});
   if (!t) return toast('ไม่พบ Task นี้ อาจถูกลบไปแล้ว');
+  if (id && isTaskUnread(t)) { markTaskRead(t); S.repaintPending = true; }   // ปิดหน้าต่างแล้วจุดแดงหายไป
   const done = isDone(t);
   const opp = t.Opportunity_ID ? S.byId.get(t.Opportunity_ID) : null;
   const opps = [{ value: '', label: 'ไม่เชื่อมกับงานขาย' }].concat(S.rows.map(o => ({

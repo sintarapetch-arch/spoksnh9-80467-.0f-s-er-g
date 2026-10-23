@@ -458,6 +458,16 @@ select.field-sm { padding-right: 30px; background-position: right 8px center; }
   cursor: pointer;
 }
 .task-title { font-size: .92rem; overflow-wrap: anywhere; }
+.task-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+  vertical-align: 1px;
+  box-shadow: 0 0 0 2px var(--danger-bg);
+}
 .task-card.is-done { opacity: .75; }
 .task-card.is-done .task-title { text-decoration: line-through; color: var(--muted); }
 .task-card > .badge { flex: none; }
