@@ -24,6 +24,7 @@
  * 1. ค่าคงที่ + เครื่องมือช่วย
  * ------------------------------------------------------------------------- */
 const TOKEN_KEY = 'pts_token', NAME_KEY = 'pts_name', SNAP_KEY = 'pts_snapshot_v2', ORDER_KEY = 'pts_status_order';
+const NOTIFY_KEY = 'pts_task_notified', TASK_TOAST_KEY = 'pts_task_toast_day';
 
 const SYNC_FAST_MS = 5000;      // ช่วงที่เพิ่งมีการใช้งาน
 const SYNC_SLOW_MS = 15000;     // เงียบไปสักพัก
@@ -267,6 +268,9 @@ const I = {
   swap: svg('<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>'),
   ban: svg('<circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/>'),
   close: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  task: svg('<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
+  check: svg('<polyline points="20 6 9 17 4 12"/>'),
+  bell: svg('<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>'),
   gear: svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'),
   history: svg('<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/><polyline points="12 7 12 12 15 14"/>'),
   up: svg('<polyline points="18 15 12 9 6 15"/>'),
@@ -292,6 +296,11 @@ const S = {
   statuses: STATUS_ORDER.slice(), closedStatus: CLOSED_ORDER.slice(), pendingQuoteStatus: [],
   master: null,          // รายการตั้งค่า (รวมที่ซ่อน) จากหลังบ้านรุ่นใหม่ — ใช้ในหน้า "ตั้งค่า"
   editableLists: false,  // true = หลังบ้านรุ่นที่แก้รายการจากในแอปได้
+  tasks: [],
+  tasksEnabled: false,   // true = หลังบ้านรุ่นที่รองรับ Task (ถึงจะแสดงเมนู Task)
+  taskScope: 'mine',     // mine = ของฉัน · byme = ฉันมอบหมาย · team = ทั้งทีม
+  taskShowDone: false,
+  taskBusy: {},
   priorities: [], categories: [], activityTypes: [],
   wonStatus: '', voidStatus: '', quoteSentStatus: '',
   sla: { warn: 7, overdue: 15 },
@@ -363,7 +372,7 @@ function reindex() {
 
 /** ลายเซ็นของข้อมูลปัจจุบัน ใช้เทียบว่า snapshot ที่เพิ่งได้มาต่างจากที่มีอยู่จริงไหม */
 function computeSignature() {
-  return JSON.stringify([S.opportunities, S.customers, S.activities, S.attachments]);
+  return JSON.stringify([S.opportunities, S.customers, S.activities, S.attachments, S.tasks]);
 }
 
 /** วาง snapshot ที่ได้มาลงในเครื่อง คืนค่า true ถ้าข้อมูลต่างจากเดิมจริง */
@@ -376,6 +385,7 @@ function applySnapshot(data) {
   ].forEach(k => { if (Array.isArray(data[k])) S[k] = data[k]; });
   ['wonStatus', 'voidStatus', 'quoteSentStatus'].forEach(k => { if (data[k]) S[k] = data[k]; });
   S.editableLists = !!data.editableLists;
+  if (Array.isArray(data.tasks)) { S.tasks = data.tasks; S.tasksEnabled = true; }
   if (data.master && typeof data.master === 'object') S.master = data.master;
   // หลังบ้านรุ่นใหม่: รายชื่อสถานะมาจาก Master_Data ที่ผู้ใช้จัดเอง ใช้ตามนั้นเลย
   // หลังบ้านรุ่นเก่า: ยึด 12 สถานะมาตรฐานเป็นหลัก แล้วต่อท้ายด้วยของที่ส่งมาเพิ่ม
@@ -399,7 +409,8 @@ function snapshotForCache() {
     statuses: S.statuses, closedStatus: S.closedStatus, pendingQuoteStatus: S.pendingQuoteStatus,
     priorities: S.priorities, categories: S.categories, activityTypes: S.activityTypes,
     wonStatus: S.wonStatus, voidStatus: S.voidStatus, quoteSentStatus: S.quoteSentStatus, sla: S.sla,
-    master: S.master, editableLists: S.editableLists
+    master: S.master, editableLists: S.editableLists,
+    tasks: S.tasksEnabled ? S.tasks : undefined
   };
 }
 
@@ -540,6 +551,7 @@ async function runSyncTick() {
 function startSync() {
   lastFullFetch = Date.now();
   scheduleSync(SYNC_FAST_MS);
+  setInterval(taskTick, 60000);   // Task ที่ถึงเวลาระหว่างเปิดแอปค้างไว้
   document.addEventListener('visibilitychange', () => { if (!document.hidden) markActivity(); });
   window.addEventListener('focus', markActivity);
   window.addEventListener('online', markActivity);
@@ -571,6 +583,7 @@ async function refresh(options) {
   const before = S.opportunities.length;
   const changed = applySnapshot(out.data);
   saveCache();
+  setTimeout(checkTaskAlerts, 300);
 
   if (!S.ready) { S.ready = true; render(); return true; }
   if (!changed) { renderSync(); return true; }
@@ -629,6 +642,12 @@ function applyWrite(out) {
     if (Array.isArray(d.closeReasons)) S.closeReasons = d.closeReasons;
     S.closedStatus = mergeList(CLOSED_ORDER, S.closedStatus);
   }
+  if (d.task && d.task.Task_ID) {
+    const i = S.tasks.findIndex(t => t.Task_ID === d.task.Task_ID);
+    if (i === -1) S.tasks.push(d.task); else S.tasks[i] = d.task;
+    markTaskSeen(d.task);   // งานที่เราเพิ่ง แก้/สร้างเอง ไม่ต้องเด้งเตือนซ้ำในเครื่องนี้
+  }
+  if (d.deletedTaskId) S.tasks = S.tasks.filter(t => t.Task_ID !== d.deletedTaskId);
   if (d.activity && d.activity.Activity_ID) S.activities.unshift(d.activity);
   if (Array.isArray(d.attachments)) d.attachments.slice().reverse().forEach(a => S.attachments.unshift(a));
   else if (d.Attachment_ID) S.attachments = S.attachments.filter(a => a.Attachment_ID !== d.Attachment_ID);
@@ -670,16 +689,20 @@ function render() {
   else if (v.name === 'rfq') viewRfq(v.params.opp || {});
   else if (v.name === 'customers') viewCustomers();
   else if (v.name === 'settings') viewSettings();
+  else if (v.name === 'tasks') viewTasks();
   else viewDashboard();
   renderNav();
 }
 
 function renderNav() {
   const active = S.view.name === 'detail' ? 'opportunities' : S.view.name;
-  const items = [['dashboard', I.dash, 'ภาพรวม'], ['opportunities', I.list, 'งานขาย'], ['rfq', I.plus, 'ขอราคา'], ['customers', I.users, 'ลูกค้า']];
+  const items = [['dashboard', I.dash, 'ภาพรวม'], ['opportunities', I.list, 'งานขาย'], ['rfq', I.plus, 'ขอราคา']];
+  if (S.tasksEnabled) items.push(['tasks', I.task, 'Task']);
+  items.push(['customers', I.users, 'ลูกค้า']);
+  const alert = S.tasksEnabled ? myTaskAlerts().length : 0;
   const nav = $('#nav');
   nav.hidden = false;
-  nav.innerHTML = items.map(n => `<button type="button" onclick="go('${n[0]}')" class="${active === n[0] ? 'is-active' : ''}">${n[1]}<span>${n[2]}</span></button>`).join('');
+  nav.innerHTML = items.map(n => `<button type="button" onclick="go('${n[0]}')" class="${active === n[0] ? 'is-active' : ''}">${n[1]}${n[0] === 'tasks' && alert ? `<b class="nav-badge">${alert > 99 ? '99+' : alert}</b>` : ''}<span>${n[2]}</span></button>`).join('');
 }
 
 /** แถบบนสุด — มีปุ่มรีเฟรชเอง และป้ายบอกว่าข้อมูลบนจอสดแค่ไหน */
@@ -938,6 +961,8 @@ function viewDashboard() {
       <button type="button" class="${S.mine ? 'is-active' : ''}" onclick="setScope(true)">งานของฉัน</button>
       <button type="button" class="${S.mine ? '' : 'is-active'}" onclick="setScope(false)">ทั้งทีม</button>
     </div>
+
+    ${taskAlertCard()}
 
     <div class="row-between">
       <p class="hint" style="margin:0">${S.arrange ? 'ลากการ์ดไปวางตำแหน่งที่ต้องการ แล้วกด เสร็จ' : 'แตะการ์ดเพื่อดูรายการงานในสถานะนั้น'}</p>
@@ -1203,6 +1228,8 @@ function viewDetail(id) {
       <button type="button" class="btn btn-outline" onclick="uploadForm('${esc(o.Opportunity_ID)}')">${I.clip}แนบไฟล์</button>
     </div>
 
+    ${S.tasksEnabled ? oppTasksSection(o) : ''}
+
     <section class="stack">
       <h2 class="section-title">Timeline${acts.length ? `<span class="count">${acts.length}</span>` : ''}</h2>
       ${acts.length ? `<div class="tl">${acts.map(a => `<div class="tl-item card card-tight stack-sm">
@@ -1444,6 +1471,322 @@ async function moveMaster(type, name, dir) {
   applyWrite(r);
 }
 
+/* -------------------------------------------------------------------- Task
+ * งานที่ทีมมอบหมายกันเอง — ใส่ชื่อผู้รับผิดชอบ วันที่ (และเวลาถ้ามี)
+ * แจ้งเตือนเมื่อครบกำหนดและเกินกำหนด 3 ทาง
+ *   1. ตัวเลขสีแดงบนเมนู Task + การ์ดเตือนบนหน้าภาพรวม (เห็นทุกเครื่อง)
+ *   2. ข้อความเด้งครั้งแรกของวันตอนเปิดแอป
+ *   3. การแจ้งเตือนของระบบ (มือถือ/คอม) — ต้องกด "เปิดการแจ้งเตือน" ก่อน
+ *      และทำงานได้เฉพาะตอนแอปเปิดอยู่หรือย่อไว้ (เว็บแอปส่งแจ้งเตือนตอนปิดแอปไม่ได้)
+ */
+const TASK_DONE = 'Done';
+const hhmm = v => { const m = String(v == null ? '' : v).match(/(\d{1,2}):(\d{2})/); return m ? pad2(m[1]) + ':' + m[2] : ''; };
+const nowHHMM = () => { const d = new Date(); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
+function addDays(dateStr, n) { const d = new Date(dateStr + 'T00:00:00'); d.setDate(d.getDate() + n); return dOnly(d); }
+function readJSON(key) { try { return JSON.parse(localStorage.getItem(key) || '{}') || {}; } catch (e) { return {}; } }
+function writeJSON(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {} }
+const isDone = t => t.Status === TASK_DONE;
+
+/** สถานะเวลาของ Task สำหรับแสดงผล */
+function taskDue(t) {
+  if (isDone(t)) return { key: 'done', tone: 'green', label: 'เสร็จแล้ว' };
+  const d = dOnly(t.Due_Date), tm = hhmm(t.Due_Time), today = todayStr();
+  const at = tm ? ' ' + tm + ' น.' : '';
+  if (!d) return { key: 'later', tone: 'slate', label: 'ไม่ระบุวัน' };
+  if (d < today) return { key: 'overdue', tone: 'red', label: 'เกินกำหนด ' + daysBetween(d, today) + ' วัน' };
+  if (d === today) {
+    if (tm && nowHHMM() > tm) return { key: 'overdue', tone: 'red', label: 'เลยเวลา' + at };
+    return { key: 'today', tone: 'amber', label: 'วันนี้' + at };
+  }
+  if (d === addDays(today, 1)) return { key: 'soon', tone: 'blue', label: 'พรุ่งนี้' + at };
+  return { key: 'later', tone: 'slate', label: fmtDate(d) + at };
+}
+
+/** ขั้นของการแจ้งเตือน: '' = ยังไม่ต้องเตือน · due = ครบกำหนด · overdue = เกินกำหนด */
+function taskStage(t) {
+  if (isDone(t)) return '';
+  const d = dOnly(t.Due_Date), tm = hhmm(t.Due_Time), today = todayStr();
+  if (!d || d > today) return '';
+  if (d < today) return 'overdue';
+  if (tm && nowHHMM() < tm) return '';   // วันนี้ แต่ยังไม่ถึงเวลา
+  return 'due';
+}
+
+const taskSortKey = t => dOnly(t.Due_Date) + ' ' + (hhmm(t.Due_Time) || '24:00');
+const byDue = (a, b) => taskSortKey(a).localeCompare(taskSortKey(b));
+
+/** Task ของฉันที่ต้องสนใจตอนนี้ (เกินกำหนด + วันนี้) — ใช้กับตัวเลขบนเมนูและการ์ดเตือน */
+function myTaskAlerts() {
+  const me = myName();
+  return S.tasks.filter(t => !isDone(t) && t.Assignee === me && ['overdue', 'today'].indexOf(taskDue(t).key) !== -1).sort(byDue);
+}
+
+/* ---------- แจ้งเตือน ---------- */
+function notifyState() {
+  if (!('Notification' in window)) return 'unsupported';
+  return Notification.permission;   // default | granted | denied
+}
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+function registerSW() {
+  if (!('serviceWorker' in navigator)) return Promise.resolve(null);
+  return navigator.serviceWorker.register('sw.js').catch(() => null);
+}
+
+async function showNotify(title, body, tag) {
+  const opts = { body: body, tag: tag, icon: 'icon-192.png', badge: 'favicon-32.png' };
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) { await reg.showNotification(title, opts); return; }
+    }
+    new Notification(title, opts);   // คอมที่ไม่มี service worker
+  } catch (e) { /* บางเครื่อง/เบราว์เซอร์ไม่ยอม — ยังมีตัวเลขบนเมนูให้เห็นอยู่ */ }
+}
+
+async function enableTaskNotify() {
+  if (notifyState() === 'unsupported') return toast('เบราว์เซอร์นี้แจ้งเตือนไม่ได้');
+  await registerSW();
+  let p = Notification.permission;
+  if (p === 'default') { try { p = await Notification.requestPermission(); } catch (e) { p = 'denied'; } }
+  if (p !== 'granted') { render(); return toast('ไม่ได้รับอนุญาตให้แจ้งเตือน'); }
+  await showNotify('PTS Sales', 'เปิดการแจ้งเตือน Task แล้ว จะเตือนเมื่อครบกำหนดและเกินกำหนด', 'pts-enabled');
+  render();
+  checkTaskAlerts();
+}
+
+/** จดไว้ว่าเตือน Task นี้ถึงขั้นไหนแล้ว (ผูกกับวัน/เวลา — ถ้าเลื่อนกำหนด จะเตือนใหม่) */
+function markTaskSeen(t) {
+  const st = taskStage(t);
+  const sent = readJSON(NOTIFY_KEY);
+  if (st) sent[t.Task_ID] = { st: st, spec: dOnly(t.Due_Date) + '|' + hhmm(t.Due_Time) };
+  else delete sent[t.Task_ID];
+  writeJSON(NOTIFY_KEY, sent);
+}
+
+/** ตรวจ Task ของฉัน แล้วเตือนตัวที่เพิ่งครบกำหนด / เพิ่งเกินกำหนด */
+function checkTaskAlerts() {
+  if (!S.ready || !S.tasksEnabled) return;
+  const alerts = myTaskAlerts();
+  renderNav();   // ตัวเลขบนเมนูตรงกับข้อมูลล่าสุดเสมอ
+  try { if (navigator.setAppBadge) { if (alerts.length) navigator.setAppBadge(alerts.length); else navigator.clearAppBadge(); } } catch (e) {}
+
+  // ข้อความเด้งครั้งแรกของวัน
+  const today = todayStr();
+  let shownDay = '';
+  try { shownDay = localStorage.getItem(TASK_TOAST_KEY) || ''; } catch (e) {}
+  if (alerts.length && shownDay !== today) {
+    const over = alerts.filter(t => taskDue(t).key === 'overdue').length;
+    const parts = [];
+    if (over) parts.push('เกินกำหนด ' + over);
+    if (alerts.length - over) parts.push('วันนี้ ' + (alerts.length - over));
+    toast('Task ของคุณ — ' + parts.join(' · '), 'info');
+    try { localStorage.setItem(TASK_TOAST_KEY, today); } catch (e) {}
+  }
+
+  if (notifyState() !== 'granted') return;
+  const me = myName();
+  const rank = { due: 1, overdue: 2 };
+  const sent = readJSON(NOTIFY_KEY), keep = {}, fire = [];
+  S.tasks.filter(t => !isDone(t) && t.Assignee === me).forEach(t => {
+    const st = taskStage(t);
+    const spec = dOnly(t.Due_Date) + '|' + hhmm(t.Due_Time);
+    const prev = sent[t.Task_ID];
+    if (prev && prev.spec === spec) keep[t.Task_ID] = prev;
+    if (!st || (prev && prev.spec === spec && rank[prev.st] >= rank[st])) return;
+    fire.push({ t: t, st: st });
+    keep[t.Task_ID] = { st: st, spec: spec };
+  });
+  writeJSON(NOTIFY_KEY, keep);   // งานที่เสร็จ/ลบ/โอนให้คนอื่นแล้ว หลุดออกจากรายการเอง
+
+  if (fire.length > 3) {
+    const over = fire.filter(x => x.st === 'overdue').length;
+    showNotify('Task ต้องทำ ' + fire.length + ' รายการ', (over ? 'เกินกำหนด ' + over + ' · ' : '') + 'แตะเพื่อดูรายการ', 'pts-task-summary');
+    return;
+  }
+  fire.forEach(x => {
+    const tm = hhmm(x.t.Due_Time);
+    const body = x.st === 'overdue'
+      ? 'เกินกำหนดแล้ว ' + daysBetween(dOnly(x.t.Due_Date), today) + ' วัน (กำหนด ' + fmtDate(x.t.Due_Date) + ')'
+      : (tm ? 'ถึงเวลา ' + tm + ' น. แล้ว' : 'ครบกำหนดวันนี้');
+    showNotify(x.t.Title, body, 'pts-task-' + x.t.Task_ID);
+  });
+}
+
+/** ทุกนาที — ถ้ามี Task เปลี่ยนสถานะเวลา (เช่น เลยเวลาที่ตั้งไว้) ค่อยวาดใหม่ */
+let taskKeySig = '';
+function taskTick() {
+  if (!S.ready || !S.tasksEnabled) return;
+  const sig = S.tasks.map(t => t.Task_ID + ':' + taskDue(t).key).join(',') + '|' + todayStr();
+  if (sig !== taskKeySig) {
+    taskKeySig = sig;
+    if (['tasks', 'dashboard', 'detail'].indexOf(S.view.name) !== -1 && !S.arrange) repaint(); else renderNav();
+  }
+  checkTaskAlerts();
+}
+
+function notifyControl() {
+  const st = notifyState();
+  if (st === 'granted') return `<p class="hint">${I.bell} การแจ้งเตือนเปิดอยู่บนเครื่องนี้ — เตือนเมื่อ Task ของคุณครบกำหนดและเกินกำหนด (ขณะเปิดแอปหรือย่อไว้)</p>`;
+  if (st === 'denied') return `<p class="hint">การแจ้งเตือนถูกปิดไว้ในเบราว์เซอร์ — เปิดได้ที่ไอคอนหน้าช่องที่อยู่เว็บ → การแจ้งเตือน → อนุญาต</p>`;
+  if (st === 'unsupported') return `<p class="hint">เครื่องนี้แจ้งเตือนไม่ได้${isIOS() ? ' — บน iPhone/iPad ให้กดแชร์ → “เพิ่มไปยังหน้าจอโฮม” แล้วเปิดจากไอคอนบนหน้าจอ' : ''} · ดูงานที่ต้องทำได้จากตัวเลขบนเมนู Task</p>`;
+  return `<button type="button" class="btn btn-soft btn-block" onclick="enableTaskNotify()">${I.bell}เปิดการแจ้งเตือนบนเครื่องนี้</button>`;
+}
+
+/* ---------- การ์ด / หน้า ---------- */
+function taskCard(t) {
+  const due = taskDue(t), done = isDone(t);
+  const opp = t.Opportunity_ID ? S.byId.get(t.Opportunity_ID) : null;
+  const id = esc(t.Task_ID);
+  const by = t.Created_By && t.Created_By !== t.Assignee ? ' · มอบหมายโดย ' + esc(t.Created_By) : '';
+  return `<div class="card task-card ${done ? 'is-done' : ''} ${due.key === 'overdue' ? 'is-overdue' : ''}">
+    <button type="button" class="task-check" onclick="toggleTask('${id}',${!done})" aria-label="${done ? 'ย้ายกลับเป็นงานค้าง' : 'ทำเสร็จแล้ว'}">${done ? I.check : ''}</button>
+    <button type="button" class="task-body" onclick="taskForm('${id}')">
+      <strong class="task-title">${esc(t.Title)}</strong>
+      <span class="meta">${esc(t.Assignee)}${by}</span>
+      ${opp ? `<span class="meta truncate">งาน: ${esc(opp.Project_Name)}</span>` : ''}
+    </button>
+    <span class="badge tone-${due.tone}">${esc(due.label)}</span>
+  </div>`;
+}
+
+function taskAlertCard() {
+  if (!S.tasksEnabled) return '';
+  const list = myTaskAlerts();
+  if (!list.length) return '';
+  const over = list.filter(t => taskDue(t).key === 'overdue').length;
+  return `<button type="button" class="card card-btn task-alert ${over ? 'is-overdue' : ''}" onclick="go('tasks')">
+    <div class="row-between"><strong>${I.bell} Task ของคุณ</strong><span class="hint">ดูทั้งหมด ›</span></div>
+    <div class="row" style="gap:6px;flex-wrap:wrap">
+      ${over ? `<span class="badge tone-red">เกินกำหนด ${over}</span>` : ''}
+      ${list.length - over ? `<span class="badge tone-amber">วันนี้ ${list.length - over}</span>` : ''}
+    </div>
+    ${list.slice(0, 3).map(t => `<div class="row-between task-alert-row"><span class="truncate grow">${esc(t.Title)}</span><span class="hint">${esc(taskDue(t).label)}</span></div>`).join('')}
+  </button>`;
+}
+
+function viewTasks() {
+  if (!S.tasksEnabled) {
+    $('#app').innerHTML = header('Task', '', "go('dashboard')") + `<div class="page"><div class="empty">ต้องอัปเดต Apps Script เป็นรุ่นล่าสุดก่อน จึงจะใช้ Task ได้</div></div>`;
+    return;
+  }
+  const me = myName();
+  const inScope = { mine: t => t.Assignee === me, byme: t => t.Created_By === me && t.Assignee !== me, team: () => true }[S.taskScope] || (() => true);
+  const list = S.tasks.filter(inScope);
+  const open = list.filter(t => !isDone(t)).sort(byDue);
+  const done = list.filter(isDone).sort((a, b) => String(b.Done_At).localeCompare(String(a.Done_At)));
+  const group = k => open.filter(t => taskDue(t).key === k);
+  const over = group('overdue');
+  const sec = (title, items, kind) => items.length ? `<section class="stack">
+      <h2 class="section-title ${kind || ''}">${title}<span class="count ${kind || ''}">${items.length}</span></h2>
+      ${items.map(taskCard).join('')}</section>` : '';
+  const seg = (k, label) => `<button type="button" class="${S.taskScope === k ? 'is-active' : ''}" onclick="setTaskScope('${k}')">${label}</button>`;
+
+  $('#app').innerHTML = header('Task', open.length + ' งานค้าง' + (over.length ? ' · เกินกำหนด ' + over.length : '')) + `<div class="page">
+    <div class="seg">${seg('mine', 'ของฉัน')}${seg('byme', 'ฉันมอบหมาย')}${seg('team', 'ทั้งทีม')}</div>
+    <button type="button" class="btn btn-primary btn-block" onclick="taskForm()">${I.plus}เพิ่ม Task</button>
+    ${notifyControl()}
+    ${open.length ? '' : `<div class="empty">${S.taskScope === 'mine' ? 'ไม่มีงานค้าง 🎉' : 'ไม่มีงานค้าง'}</div>`}
+    ${sec('เกินกำหนด', over, 'is-danger')}
+    ${sec('วันนี้', group('today'), 'is-warn')}
+    ${sec('พรุ่งนี้', group('soon'))}
+    ${sec('ถัดไป', group('later'))}
+    ${done.length ? `<button type="button" class="btn btn-soft btn-block" onclick="toggleTaskDone()">${S.taskShowDone ? 'ซ่อน' : 'แสดง'}งานที่เสร็จแล้ว (${done.length})</button>` : ''}
+    ${S.taskShowDone ? sec('เสร็จแล้ว', done) : ''}
+  </div>`;
+}
+
+function setTaskScope(k) { S.taskScope = k; viewTasks(); }
+function toggleTaskDone() { S.taskShowDone = !S.taskShowDone; viewTasks(); }
+
+function oppTasksSection(o) {
+  const list = S.tasks.filter(t => t.Opportunity_ID === o.Opportunity_ID);
+  const open = list.filter(t => !isDone(t)).sort(byDue), done = list.filter(isDone);
+  return `<section class="stack">
+    <div class="row-between">
+      <h2 class="section-title">Task${open.length ? `<span class="count">${open.length}</span>` : ''}</h2>
+      <button type="button" class="btn btn-outline btn-sm" onclick="taskForm('',{Opportunity_ID:'${esc(o.Opportunity_ID)}'})">${I.plus}เพิ่ม Task</button>
+    </div>
+    ${list.length ? open.concat(done).map(taskCard).join('') : '<div class="empty">ยังไม่มี Task ของงานนี้</div>'}
+  </section>`;
+}
+
+/** รายชื่อสำหรับช่องผู้รับผิดชอบ — รวมจากงานขายและ Task ที่เคยมอบหมาย */
+function peopleNames() {
+  return mergeList([myName()].concat(S.owners), S.tasks.map(t => t.Assignee)).filter(Boolean)
+    .filter((n, i, a) => a.indexOf(n) === i);
+}
+
+function taskForm(id, preset) {
+  const t = id ? S.tasks.find(x => x.Task_ID === id) : Object.assign({ Assignee: myName(), Due_Date: todayStr() }, preset || {});
+  if (!t) return toast('ไม่พบ Task นี้ อาจถูกลบไปแล้ว');
+  const done = isDone(t);
+  const opp = t.Opportunity_ID ? S.byId.get(t.Opportunity_ID) : null;
+  const opps = [{ value: '', label: 'ไม่เชื่อมกับงานขาย' }].concat(S.rows.map(o => ({
+    value: o.Opportunity_ID, label: o.Project_Name, sub: o.Opportunity_ID + ' · ' + (o.Customer.Company_Name || '')
+  })));
+  modal(`<form class="stack" onsubmit="saveTaskForm(event,'${esc(id || '')}')">
+    ${modalHead(id ? 'แก้ไข Task' : 'เพิ่ม Task')}
+    ${inputField('Title', 'ชื่อ Task', t.Title, 'text', true)}
+    ${pickerField({ name: 'Assignee', label: 'ผู้รับผิดชอบ', value: t.Assignee, required: true, allowNew: true,
+      items: peopleNames().map(n => ({ value: n, label: n })), hint: 'พิมพ์ชื่อ หรือเลือกจากรายชื่อ' })}
+    <div class="grid-2">
+      ${inputField('Due_Date', 'วันที่ต้องทำ', t.Due_Date, 'date', true)}
+      ${inputField('Due_Time', 'เวลา (ไม่บังคับ)', hhmm(t.Due_Time), 'time')}
+    </div>
+    ${textField('Detail', 'รายละเอียด', t.Detail, 3)}
+    ${pickerField({ name: 'Opportunity_ID', label: 'เชื่อมกับงานขาย (ไม่บังคับ)', value: t.Opportunity_ID || '', items: opps, hint: 'พิมพ์ชื่องานหรือเลขที่งาน' })}
+    ${id ? `<p class="hint">สร้างโดย ${esc(t.Created_By || '-')} · ${fmtDateTime(t.Created_At)}${done ? ' · เสร็จโดย ' + esc(t.Done_By || '-') + ' · ' + fmtDateTime(t.Done_At) : ''}</p>` : ''}
+    <button class="btn btn-primary btn-block">${id ? 'บันทึก' : 'เพิ่ม Task'}</button>
+    ${id ? `<div class="grid-2">
+      <button type="button" class="btn btn-soft" onclick="toggleTask('${esc(id)}',${!done},true)">${done ? 'ย้ายกลับเป็นงานค้าง' : I.check + 'ทำเสร็จแล้ว'}</button>
+      <button type="button" class="btn btn-danger" onclick="removeTask('${esc(id)}')">${I.trash}ลบ</button>
+    </div>` : ''}
+    ${opp ? `<button type="button" class="btn btn-outline btn-block" onclick="closeModal();go('detail',{id:'${esc(opp.Opportunity_ID)}'})">เปิดงานขาย ${esc(opp.Opportunity_ID)}</button>` : ''}
+  </form>`);
+}
+
+async function saveTaskForm(e, id) {
+  e.preventDefault();
+  const x = Object.fromEntries(new FormData(e.target));
+  if (id) x.Task_ID = id;
+  lockForm(e, true);
+  const r = await post('saveTask', x);
+  if (!r.success) { lockForm(e, false); return toast(r.message); }
+  applyWrite(r);
+  closeModal();
+  toast(r.message, 'ok');
+  render();
+}
+
+/** ติ๊กเสร็จ — ขยับบนจอทันทีก่อน แล้วค่อยบันทึก ถ้าบันทึกไม่ผ่านจะคืนค่าเดิม */
+async function toggleTask(id, done, fromModal) {
+  if (S.taskBusy[id]) return;
+  const before = S.tasks.find(t => t.Task_ID === id);
+  if (!before) return toast('ไม่พบ Task นี้ อาจถูกลบไปแล้ว');
+  S.taskBusy[id] = true;
+  const swap = v => { const i = S.tasks.findIndex(t => t.Task_ID === id); if (i !== -1) S.tasks[i] = v; };
+  swap(Object.assign({}, before, { Status: done ? TASK_DONE : 'Open', Done_By: done ? myName() : '', Done_At: done ? new Date().toISOString() : '' }));
+  if (fromModal) closeModal();
+  render();
+  const r = await post('setTaskDone', { Task_ID: id, Done: done });
+  delete S.taskBusy[id];
+  if (!r.success) { swap(before); render(); return toast(r.message); }
+  applyWrite(r);
+  toast(r.message, 'ok');
+  render();
+}
+
+async function removeTask(id) {
+  if (!confirm('ลบ Task นี้หรือไม่?')) return;
+  const r = await post('deleteTask', { Task_ID: id });
+  if (!r.success) return toast(r.message);
+  applyWrite(r);
+  closeModal();
+  toast(r.message, 'ok');
+  render();
+}
+
 /* ------------------------------------------------------------------ ลูกค้า */
 function viewCustomers() {
   $('#app').innerHTML = header('ลูกค้า', S.customers.length + ' รายการ') + `<div class="page">
@@ -1664,6 +2007,16 @@ function renderSkeleton() {
 
 function boot() {
   if (!token()) return renderLogin();
+
+  // กดการแจ้งเตือนตอนแอปปิดอยู่ จะเปิดมาที่ ?view=tasks
+  if (new URLSearchParams(location.search).get('view') === 'tasks') {
+    S.view = { name: 'tasks', params: {} };
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
+  }
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.type === 'open-tasks') go('tasks'); });
+    if (notifyState() === 'granted') registerSW();
+  }
 
   // เปิดแอปแล้วเห็นข้อมูลทันทีจากก้อนที่เก็บไว้ในเครื่อง ไม่ต้องนั่งดูหน้าจอเปล่า
   const cached = readCache();
