@@ -1431,18 +1431,32 @@ function viewSettings() {
   </div>`;
 }
 
-/** การ์ดแจ้งเตือนในหน้าตั้งค่า — สถานะของเครื่องนี้ + ปุ่มทดสอบ */
+/** การ์ดแจ้งเตือนในหน้าตั้งค่า — ตรวจทีละขั้นว่าติดตรงไหน + ปุ่มทดสอบ */
+let pushHealthBusy = false;
 function notifySettingsCard() {
-  const st = notifyState();
-  let body;
-  if (st === 'granted' && S.pushOn) body = `<p class="hint">เครื่องนี้รับแจ้งเตือน Task ได้แม้ปิดแอป</p>
-    <button type="button" class="btn btn-soft btn-block" onclick="testPushNow()">${I.bell}ส่งแจ้งเตือนทดสอบ (กดแล้วปิดแอปได้เลย)</button>`;
-  else if (st === 'granted' && S.pushKey && 'PushManager' in window) body = `<p class="hint">เครื่องนี้ยังไม่ได้ลงทะเบียนรับแจ้งเตือนแบบปิดแอป</p>
-    <button type="button" class="btn btn-soft btn-block" onclick="enableTaskNotify()">${I.bell}เปิดการแจ้งเตือนแบบปิดแอป</button>`;
-  else if (st === 'granted') body = `<p class="hint">เครื่องนี้เตือนได้เฉพาะตอนเปิดแอปหรือย่อไว้${S.pushKey ? '' : ' — ผู้ดูแลยังไม่ได้รัน setupPush ใน Apps Script'}</p>
-    <button type="button" class="btn btn-soft btn-block" onclick="showNotify('PTS Sales','ทดสอบการแจ้งเตือน','pts-test')">${I.bell}ส่งแจ้งเตือนทดสอบ</button>`;
-  else body = notifyControl();
-  return `<section class="card stack"><h2>การแจ้งเตือน Task</h2>${body}</section>`;
+  const h = S.pushHealth;
+  if (!h && !pushHealthBusy) { pushHealthBusy = true; setTimeout(() => checkPushHealth().finally(() => { pushHealthBusy = false; }), 0); }
+  const row = (label, ok, text) => `<div class="row-between diag-row"><span>${label}</span><span class="badge tone-${ok ? 'green' : 'red'}">${esc(text)}</span></div>`;
+  const permText = { granted: 'อนุญาตแล้ว', denied: 'ถูกปิดไว้', default: 'ยังไม่ได้อนุญาต', unsupported: 'เครื่องไม่รองรับ' };
+  const t = S.pushTest;
+  const granted = notifyState() === 'granted';
+  return `<section class="card stack">
+    <h2>การแจ้งเตือน Task</h2>
+    ${h ? `<div class="stack-sm">
+      ${row('สิทธิ์แจ้งเตือน', h.perm === 'granted', permText[h.perm] || h.perm)}
+      ${row('หลังบ้าน (setupPush)', h.key, h.key ? 'พร้อม' : 'ยังไม่ได้ตั้งค่า')}
+      ${row('ตัวรับแจ้งเตือนในเครื่อง', h.sw >= SW_WANT, h.sw >= SW_WANT ? 'รุ่นล่าสุด' : 'ตัวเก่า — ปิดแอปแล้วเปิดใหม่')}
+      ${row('ลงทะเบียนรับแจ้งเตือน', !!h.sub, h.sub || 'ยังไม่ได้ลงทะเบียน')}
+    </div>` : '<p class="hint">กำลังตรวจ…</p>'}
+    ${granted ? '' : notifyControl()}
+    ${granted ? `<div class="grid-2">
+      <button type="button" class="btn btn-soft" onclick="testLocalNotify()">${I.bell}ทดสอบบนเครื่อง</button>
+      <button type="button" class="btn btn-primary" onclick="testPushNow()">${I.bell}ทดสอบแบบปิดแอป</button>
+    </div>
+    <p class="hint">ทดสอบแบบปิดแอป: กดแล้วปิดแอปภายใน 8 วินาที ถ้าใช้ได้จะเด้งเอง · เปิดกลับมาดูผลได้ที่นี่</p>` : ''}
+    ${t ? `<div class="why" style="${t.ok === false ? 'background:var(--danger-bg);color:var(--danger)' : ''}">ผลทดสอบล่าสุด ${fmtDateTime(t.at)}: ${esc(t.msg)}</div>` : ''}
+    <button type="button" class="btn btn-outline btn-sm" onclick="S.pushHealth=null;render()">ตรวจใหม่</button>
+  </section>`;
 }
 
 function masterSection(type, label, hint) {
@@ -1558,9 +1572,30 @@ function notifyState() {
 }
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+const SW_WANT = 2;   // ต้องตรงกับ SW_VERSION ใน sw.js
+let swUpdated = false;
 function registerSW() {
   if (!('serviceWorker' in navigator)) return Promise.resolve(null);
-  return navigator.serviceWorker.register('sw.js').catch(() => null);
+  return navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+    // ขอเช็คตัวใหม่จากเว็บครั้งแรกของการเปิดแอป — ไม่งั้นเครื่องอาจใช้ตัวเก่าที่ยังไม่มีส่วนรับแจ้งเตือนอยู่หลายชั่วโมง
+    if (!swUpdated && reg && reg.update) { swUpdated = true; reg.update().catch(() => {}); }
+    return reg;
+  }).catch(() => null);
+}
+
+/** ถามตัวรับแจ้งเตือนในเครื่องว่าเป็นรุ่นไหน — 0 = ไม่มี/ตัวเก่ามาก */
+async function swVersion() {
+  try {
+    const reg = await swReady();
+    const sw = reg && (reg.active || reg.waiting || reg.installing);
+    if (!sw) return 0;
+    return await new Promise(res => {
+      const ch = new MessageChannel();
+      const t = setTimeout(() => res(0), 2000);
+      ch.port1.onmessage = e => { clearTimeout(t); res((e.data && e.data.version) || 0); };
+      sw.postMessage({ type: 'version' }, [ch.port2]);
+    });
+  } catch (e) { return 0; }
 }
 
 /** รอให้ service worker พร้อม (สมัครรับแจ้งเตือนได้เฉพาะตอนมันทำงานแล้ว) — ไม่พร้อมใน 10 วิ คืน null */
@@ -1617,14 +1652,38 @@ function afterSnapshot() {
 }
 
 /** ส่งแจ้งเตือนทดสอบมาที่เครื่องนี้ — หน่วง 8 วินาที ให้ปิดแอปก่อนแล้วดูว่าเด้งจริง */
+const pushTestNote = (ok, msg) => { S.pushTest = { ok: ok, msg: msg, at: new Date() }; if (S.view.name === 'settings') render(); };
+
 async function testPushNow() {
-  if (!(await ensurePushSub(true))) { render(); return toast('ลงทะเบียนเครื่องไม่สำเร็จ ลองใหม่อีกครั้ง'); }
+  pushTestNote(null, 'กำลังลงทะเบียนเครื่อง…');
+  if (!(await ensurePushSub(true))) return pushTestNote(false, 'ลงทะเบียนเครื่องกับหลังบ้านไม่สำเร็จ');
   const reg = await swReady();
   const sub = reg && await reg.pushManager.getSubscription();
-  if (!sub) return toast('ลงทะเบียนเครื่องไม่สำเร็จ ลองใหม่อีกครั้ง');
+  if (!sub) return pushTestNote(false, 'เครื่องนี้ไม่มีการสมัครรับแจ้งเตือน');
   toast('กำลังส่ง — ปิดแอปหรือสลับไปแอปอื่นได้เลย จะเด้งในอีกประมาณ 10 วินาที', 'info');
+  pushTestNote(null, 'กำลังส่งผ่าน ' + new URL(sub.endpoint).host + ' …');
   const r = await post('testPush', { Endpoint: sub.endpoint, Delay: 8 });
-  if (!r.success) toast(r.message);
+  if (!r.success) { toast(r.message); return pushTestNote(false, r.message); }
+  pushTestNote(true, 'เซิร์ฟเวอร์แจ้งเตือนรับแล้ว (' + ((r.data && r.data.status) || 'ok') + ') — ถ้าไม่เด้ง ปัญหาอยู่ที่เครื่อง ดูข้อ "ตัวรับแจ้งเตือนในเครื่อง" ด้านบน');
+}
+
+/** ทดสอบแสดงแจ้งเตือนจากตัวรับในเครื่องโดยตรง (ไม่ผ่านเซิร์ฟเวอร์) */
+async function testLocalNotify() {
+  try {
+    const reg = await swReady();
+    if (!reg) return pushTestNote(false, 'ไม่มีตัวรับแจ้งเตือนในเครื่อง');
+    await reg.showNotification('PTS Sales', { body: 'ทดสอบแสดงบนเครื่องนี้', tag: 'pts-test-local', icon: 'icon-192.png' });
+    pushTestNote(true, 'สั่งแสดงแจ้งเตือนบนเครื่องแล้ว — ถ้าไม่เห็น ให้เปิดการแจ้งเตือนของเบราว์เซอร์ในการตั้งค่าเครื่อง (มือถือ: ตั้งค่า → แอป → Chrome → การแจ้งเตือน)');
+  } catch (e) { pushTestNote(false, 'แสดงแจ้งเตือนบนเครื่องไม่ได้: ' + e.message); }
+}
+
+/** ตรวจสถานะการแจ้งเตือนของเครื่องนี้ แล้วแสดงบนการ์ด */
+async function checkPushHealth() {
+  const h = { perm: notifyState(), key: !!S.pushKey, sw: 0, sub: '' };
+  h.sw = await swVersion();
+  try { const reg = await swReady(); const sub = reg && reg.pushManager && await reg.pushManager.getSubscription(); h.sub = sub ? new URL(sub.endpoint).host : ''; } catch (e) {}
+  S.pushHealth = h;
+  if (S.view.name === 'settings') render();
 }
 
 async function showNotify(title, body, tag) {

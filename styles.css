@@ -419,6 +419,9 @@ select.field-sm { padding-right: 30px; background-position: right 8px center; }
 .stat .stat-l { margin-top: 2px; font-size: .72rem; color: var(--muted); }
 .stat.is-zero .stat-n { color: var(--faint); }
 
+/* หน้าตั้งค่า: แถวตรวจการแจ้งเตือน */
+.diag-row { font-size: .86rem; gap: 8px; }
+
 /* Task */
 .task-card { display: flex; align-items: flex-start; gap: 10px; padding: 12px; }
 .task-card.is-overdue { border-color: #fecdd3; background: #fffafb; }

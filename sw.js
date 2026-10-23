@@ -5,7 +5,14 @@
 //   1. Chrome บน Android แสดงการแจ้งเตือนได้ผ่าน service worker เท่านั้น
 //   2. รับข้อความแจ้งเตือนจากหลังบ้าน (Web Push) ตอนปิดแอปอยู่ แล้วแสดงให้เห็น
 
+const SW_VERSION = 2;   // เพิ่มเลขทุกครั้งที่แก้ไฟล์นี้ — หน้าตั้งค่าใช้ตรวจว่าเครื่องโหลดตัวใหม่แล้ว
+
 self.addEventListener('install', () => self.skipWaiting());
+
+// หน้าเว็บถามว่าตัวรับแจ้งเตือนในเครื่องเป็นรุ่นไหน
+self.addEventListener('message', event => {
+  if (event.data && event.data.type === 'version' && event.ports && event.ports[0]) event.ports[0].postMessage({ version: SW_VERSION, push: true });
+});
 self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
 
 // ข้อความจากหลังบ้าน (WebPush.gs) — { items: [{ title, body, tag }] }
