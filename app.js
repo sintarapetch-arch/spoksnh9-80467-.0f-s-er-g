@@ -1425,9 +1425,24 @@ const MASTER_TYPES = [
 
 function viewSettings() {
   $('#app').innerHTML = header('ตั้งค่า', 'รายการตัวเลือกของระบบ', "go('dashboard')") + `<div class="page">
+    ${S.tasksEnabled ? notifySettingsCard() : ''}
     ${!S.editableLists ? `<div class="empty">ต้องอัปเดต Apps Script เป็นรุ่นล่าสุดก่อน จึงจะแก้รายการจากในแอปได้<br><span class="hint">(อัปโหลดไฟล์ในโฟลเดอร์ apps-script แล้ว Deploy → New version)</span></div>`
     : `<p class="hint">ผู้รับผิดชอบไม่ต้องตั้งค่า — พิมพ์ชื่อใหม่ในช่องผู้รับผิดชอบได้เลยตอนสร้างงาน</p>` + MASTER_TYPES.map(t => masterSection(t[0], t[1], t[2])).join('')}
   </div>`;
+}
+
+/** การ์ดแจ้งเตือนในหน้าตั้งค่า — สถานะของเครื่องนี้ + ปุ่มทดสอบ */
+function notifySettingsCard() {
+  const st = notifyState();
+  let body;
+  if (st === 'granted' && S.pushOn) body = `<p class="hint">เครื่องนี้รับแจ้งเตือน Task ได้แม้ปิดแอป</p>
+    <button type="button" class="btn btn-soft btn-block" onclick="testPushNow()">${I.bell}ส่งแจ้งเตือนทดสอบ (กดแล้วปิดแอปได้เลย)</button>`;
+  else if (st === 'granted' && S.pushKey && 'PushManager' in window) body = `<p class="hint">เครื่องนี้ยังไม่ได้ลงทะเบียนรับแจ้งเตือนแบบปิดแอป</p>
+    <button type="button" class="btn btn-soft btn-block" onclick="enableTaskNotify()">${I.bell}เปิดการแจ้งเตือนแบบปิดแอป</button>`;
+  else if (st === 'granted') body = `<p class="hint">เครื่องนี้เตือนได้เฉพาะตอนเปิดแอปหรือย่อไว้${S.pushKey ? '' : ' — ผู้ดูแลยังไม่ได้รัน setupPush ใน Apps Script'}</p>
+    <button type="button" class="btn btn-soft btn-block" onclick="showNotify('PTS Sales','ทดสอบการแจ้งเตือน','pts-test')">${I.bell}ส่งแจ้งเตือนทดสอบ</button>`;
+  else body = notifyControl();
+  return `<section class="card stack"><h2>การแจ้งเตือน Task</h2>${body}</section>`;
 }
 
 function masterSection(type, label, hint) {
