@@ -1433,6 +1433,17 @@ function viewSettings() {
   </div>`;
 }
 
+/** สถานะจากหลังบ้าน: ตัวตั้งเวลายังทำงานไหม และส่งถึงเครื่องนี้ผลเป็นยังไง */
+function serverRows(sv, row) {
+  const ago = v => { const ms = Date.now() - new Date(v).getTime(); return isNaN(ms) ? '-' : ms < 90000 ? 'เมื่อสักครู่' : Math.round(ms / 60000) < 60 ? Math.round(ms / 60000) + ' นาทีที่แล้ว' : fmtDateTime(v); };
+  const runOk = sv.trigger && sv.lastRun && Date.now() - new Date(sv.lastRun).getTime() < 3 * 60000;
+  const d = sv.device;
+  const sentOk = d && d.lastStatus >= 200 && d.lastStatus < 300;
+  return row('ตัวตรวจ Task (ทุก 1 นาที)', runOk, !sv.trigger ? 'ไม่ทำงาน — ผู้ดูแลต้องรัน setupPush' : sv.lastRun ? 'ทำงานล่าสุด ' + ago(sv.lastRun) : 'ยังไม่เคยทำงาน')
+    + (d ? row('ส่งถึงเครื่องนี้ล่าสุด', !d.lastPush || sentOk, d.lastPush ? ago(d.lastPush) + ' · ' + (sentOk ? 'สำเร็จ' : 'ไม่สำเร็จ (' + d.lastStatus + ')') : 'ยังไม่เคยส่ง') : '')
+    + (d && d.lastError && !sentOk ? `<div class="why" style="background:var(--danger-bg);color:var(--danger)">ข้อความจากเซิร์ฟเวอร์แจ้งเตือน: ${esc(d.lastError)}</div>` : '');
+}
+
 /** การ์ดแจ้งเตือนในหน้าตั้งค่า — ตรวจทีละขั้นว่าติดตรงไหน + ปุ่มทดสอบ */
 let pushHealthBusy = false;
 function notifySettingsCard() {
@@ -1448,7 +1459,8 @@ function notifySettingsCard() {
       ${row('สิทธิ์แจ้งเตือน', h.perm === 'granted', permText[h.perm] || h.perm)}
       ${row('หลังบ้าน (setupPush)', h.key, h.key ? 'พร้อม' : 'ยังไม่ได้ตั้งค่า')}
       ${row('ตัวรับแจ้งเตือนในเครื่อง', h.sw >= SW_WANT, h.sw >= SW_WANT ? 'รุ่นล่าสุด' : 'ตัวเก่า — ปิดแอปแล้วเปิดใหม่')}
-      ${row('ลงทะเบียนรับแจ้งเตือน', !!h.sub, h.sub || 'ยังไม่ได้ลงทะเบียน')}
+      ${row('ลงทะเบียนรับแจ้งเตือน', !!h.sub && (!h.server || !!h.server.device), h.sub ? (h.server && !h.server.device ? 'หลังบ้านไม่รู้จักเครื่องนี้ — กดทดสอบแบบปิดแอป' : h.sub) : 'ยังไม่ได้ลงทะเบียน')}
+      ${h.server ? serverRows(h.server, row) : ''}
     </div>` : '<p class="hint">กำลังตรวจ…</p>'}
     ${granted ? '' : notifyControl()}
     ${granted ? `<div class="grid-2">
@@ -1603,7 +1615,7 @@ function notifyState() {
 }
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
-const SW_WANT = 2;   // ต้องตรงกับ SW_VERSION ใน sw.js
+const SW_WANT = 3;   // ต้องตรงกับ SW_VERSION ใน sw.js
 let swUpdated = false;
 function registerSW() {
   if (!('serviceWorker' in navigator)) return Promise.resolve(null);
@@ -1675,8 +1687,26 @@ async function ensurePushSub(force) {
 }
 
 /** หลังได้ข้อมูลชุดใหม่ — ตรวจแจ้งเตือน และลงทะเบียนเครื่อง (ครั้งเดียวต่อการเปิดแอป) */
+/** ข้อความจาก sw.js */
+function onSwMessage(e) {
+  const m = (e && e.data) || {};
+  if (m.type === 'open-tasks') go('tasks');
+  else if (m.type === 'open-task') { S.openTask = m.id; go('tasks'); openPendingTask(); }
+  else if (m.type === 'push') { markActivity(); refresh({ silent: true }); }   // มีงานใหม่/ครบกำหนด → ดึงข้อมูลล่าสุดทันที
+}
+
+/** แตะแจ้งเตือนของ Task ไหน เปิดหน้าต่าง Task นั้นให้เลย (รอให้ข้อมูลมาก่อน) */
+function openPendingTask() {
+  const id = S.openTask;
+  if (!id || !S.ready || !S.tasksEnabled) return;
+  if (!S.tasks.some(t => t.Task_ID === id)) return;   // ยังไม่มีในข้อมูลชุดนี้ รอชุดถัดไป
+  S.openTask = '';
+  if (!$('#modal')) taskForm(id);
+}
+
 function afterSnapshot() {
   checkTaskAlerts();
+  openPendingTask();
   if (S.pushChecked || !S.pushKey || notifyState() !== 'granted') return;
   S.pushChecked = true;
   ensurePushSub().then(() => { if (S.view.name === 'tasks') repaint(); });
@@ -1696,6 +1726,7 @@ async function testPushNow() {
   const r = await post('testPush', { Endpoint: sub.endpoint, Delay: 8 });
   if (!r.success) { toast(r.message); return pushTestNote(false, r.message); }
   pushTestNote(true, 'เซิร์ฟเวอร์แจ้งเตือนรับแล้ว (' + ((r.data && r.data.status) || 'ok') + ') — ถ้าไม่เด้ง ปัญหาอยู่ที่เครื่อง ดูข้อ "ตัวรับแจ้งเตือนในเครื่อง" ด้านบน');
+  S.pushHealth = null; if (S.view.name === 'settings') render();   // ตรวจใหม่ เห็นผลส่งจากหลังบ้าน
 }
 
 /** ทดสอบแสดงแจ้งเตือนจากตัวรับในเครื่องโดยตรง (ไม่ผ่านเซิร์ฟเวอร์) */
@@ -1710,9 +1741,14 @@ async function testLocalNotify() {
 
 /** ตรวจสถานะการแจ้งเตือนของเครื่องนี้ แล้วแสดงบนการ์ด */
 async function checkPushHealth() {
-  const h = { perm: notifyState(), key: !!S.pushKey, sw: 0, sub: '' };
+  const h = { perm: notifyState(), key: !!S.pushKey, sw: 0, sub: '', server: null };
   h.sw = await swVersion();
-  try { const reg = await swReady(); const sub = reg && reg.pushManager && await reg.pushManager.getSubscription(); h.sub = sub ? new URL(sub.endpoint).host : ''; } catch (e) {}
+  let endpoint = '';
+  try { const reg = await swReady(); const sub = reg && reg.pushManager && await reg.pushManager.getSubscription(); if (sub) { endpoint = sub.endpoint; h.sub = new URL(sub.endpoint).host; } } catch (e) {}
+  if (endpoint && S.pushKey) {
+    const r = await post('pushStatus', { Endpoint: endpoint });
+    if (r.success && r.data) h.server = r.data;   // หลังบ้านรุ่นเก่าไม่มีคำสั่งนี้ — ข้ามไป
+  }
   S.pushHealth = h;
   if (S.view.name === 'settings') render();
 }
@@ -2197,12 +2233,14 @@ function boot() {
   if (!token()) return renderLogin();
 
   // กดการแจ้งเตือนตอนแอปปิดอยู่ จะเปิดมาที่ ?view=tasks
-  if (new URLSearchParams(location.search).get('view') === 'tasks') {
+  const qs = new URLSearchParams(location.search);
+  if (qs.get('view') === 'tasks') {
     S.view = { name: 'tasks', params: {} };
+    S.openTask = qs.get('task') || '';
     try { history.replaceState(null, '', location.pathname); } catch (e) {}
   }
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.type === 'open-tasks') go('tasks'); });
+    navigator.serviceWorker.addEventListener('message', onSwMessage);
     if (notifyState() === 'granted') registerSW();
   }
 
