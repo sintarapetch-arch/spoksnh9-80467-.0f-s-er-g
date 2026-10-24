@@ -471,6 +471,10 @@ select.field-sm { padding-right: 30px; background-position: right 8px center; }
 .task-card.is-done { opacity: .75; }
 .task-card.is-done .task-title { text-decoration: line-through; color: var(--muted); }
 .task-card > .badge { flex: none; }
+.task-badges { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.cust-tasks { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line); }
+.cust-task { width: 100%; padding: 8px 2px; border: 0; border-bottom: 1px solid var(--line); background: none; font: inherit; font-size: .88rem; text-align: left; cursor: pointer; gap: 8px; color: inherit; }
+.cust-task:last-child { border-bottom: 0; }
 .task-alert { display: grid; gap: 8px; border-color: #fde68a; background: #fffbeb; text-align: left; }
 .task-alert.is-overdue { border-color: #fecdd3; background: var(--danger-bg); }
 .task-alert strong { display: inline-flex; align-items: center; gap: 6px; }

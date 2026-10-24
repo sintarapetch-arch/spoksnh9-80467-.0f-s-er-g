@@ -301,6 +301,8 @@ const S = {
   tasksEnabled: false,   // true = หลังบ้านรุ่นที่รองรับ Task (ถึงจะแสดงเมนู Task)
   taskScope: 'mine',     // mine = ของฉัน · byme = ฉันมอบหมาย · team = ทั้งทีม
   taskShowDone: false,
+  taskQuery: '',
+  taskFilter: { person: '', priority: '' },
   taskBusy: {},
   pushKey: '',           // กุญแจ VAPID จากหลังบ้าน — มีค่า = ส่งแจ้งเตือนแบบปิดแอปได้
   pushOn: false,         // เครื่องนี้ลงทะเบียนรับแจ้งเตือนแบบปิดแอปแล้ว
@@ -646,6 +648,7 @@ function applyWrite(out) {
     if (Array.isArray(d.statuses)) S.statuses = d.statuses;
     if (Array.isArray(d.workTypes)) S.workTypes = d.workTypes;
     if (Array.isArray(d.closeReasons)) S.closeReasons = d.closeReasons;
+    if (Array.isArray(d.owners)) S.owners = d.owners;   // รายชื่อพนักงานเปลี่ยน → ทุกช่องเลือกเห็นทันที
     S.closedStatus = mergeList(CLOSED_ORDER, S.closedStatus);
   }
   if (d.task && d.task.Task_ID) {
@@ -1159,7 +1162,7 @@ function viewList() {
       <input id="q" class="field" value="${esc(f.query)}" placeholder="ค้นหา งาน / บริษัท / แผนก / ผู้รับผิดชอบ / โทร" oninput="onSearch(this.value)" autocomplete="off">
       <div class="grid-3">
         <select class="field field-sm" onchange="setFilter('status',this.value)"><option value="">ทุกสถานะ</option>${S.statuses.map(s => `<option ${f.status === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
-        <select class="field field-sm" onchange="setFilter('owner',this.value)"><option value="">ทุกผู้รับผิดชอบ</option>${S.owners.map(s => `<option ${f.owner === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
+        <select class="field field-sm" onchange="setFilter('owner',this.value)"><option value="">ทุกผู้รับผิดชอบ</option>${peopleNames().map(s => `<option ${f.owner === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
         <select class="field field-sm" onchange="setFilter('priority',this.value)"><option value="">ทุกความสำคัญ</option>${S.priorities.map(s => `<option ${f.priority === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
       </div>
       ${(f.status || f.owner || f.priority || f.query) ? `<button type="button" class="btn btn-soft btn-sm" onclick="clearFilters()">ล้างตัวกรองทั้งหมด</button>` : ''}
@@ -1307,7 +1310,7 @@ function viewRfq(o) {
         ${inputField('Due_Date', 'ครบกำหนด', o.Due_Date, 'date')}
       </div>
       ${pickerField({ name: 'Owner', label: 'ผู้รับผิดชอบ', value: o.Owner || myName(), required: true, allowNew: true,
-        items: S.owners.map(n => ({ value: n, label: n })), hint: 'พิมพ์ไม่กี่ตัวเพื่อค้นหา หรือพิมพ์ชื่อใหม่' })}
+        items: peopleNames().map(n => ({ value: n, label: n })), hint: 'พิมพ์ไม่กี่ตัวเพื่อค้นหา หรือพิมพ์ชื่อใหม่' })}
       <div class="grid-2">
         ${inputField('Estimated_Value', 'มูลค่าคาดการณ์', o.Estimated_Value, 'number')}
         ${inputField('Quotation_No', 'เลขที่ใบเสนอราคา', o.Quotation_No)}
@@ -1420,6 +1423,7 @@ async function saveOpp(e, id) {
  * ทุกอย่างเก็บใน Master_Data บน Google Sheet มีผลกับทุกคนทันที
  */
 const MASTER_TYPES = [
+  ['Person', 'รายชื่อพนักงาน (ผู้รับผิดชอบ)', 'เช่น สมชาย ใจดี'],
   ['Status', 'สถานะงาน', 'เช่น รอผลประมูล'],
   ['Work_Type', 'ประเภทงาน', 'เช่น PM Chiller'],
   ['Close_Reason', 'เหตุผลปิดงาน', 'เช่น ลูกค้าเลือกเจ้าอื่น']
@@ -1429,7 +1433,7 @@ function viewSettings() {
   $('#app').innerHTML = header('ตั้งค่า', 'รายการตัวเลือกของระบบ', "go('dashboard')") + `<div class="page">
     ${S.tasksEnabled ? notifySettingsCard() : ''}
     ${!S.editableLists ? `<div class="empty">ต้องอัปเดต Apps Script เป็นรุ่นล่าสุดก่อน จึงจะแก้รายการจากในแอปได้<br><span class="hint">(อัปโหลดไฟล์ในโฟลเดอร์ apps-script แล้ว Deploy → New version)</span></div>`
-    : `<p class="hint">ผู้รับผิดชอบไม่ต้องตั้งค่า — พิมพ์ชื่อใหม่ในช่องผู้รับผิดชอบได้เลยตอนสร้างงาน</p>` + MASTER_TYPES.map(t => masterSection(t[0], t[1], t[2])).join('')}
+    : MASTER_TYPES.filter(t => t[0] !== 'Person' || Array.isArray(S.master && S.master.Person)).map(t => masterSection(t[0], t[1], t[2])).join('')}
   </div>`;
 }
 
@@ -1481,8 +1485,25 @@ function masterSection(type, label, hint) {
       <input name="Name" class="field grow" placeholder="${esc(hint)}" required autocomplete="off" maxlength="60">
       <button class="btn btn-primary btn-sm">เพิ่ม</button>
     </form>
+    ${type === 'Person' ? personHelp(items) : ''}
     <div class="stack-sm">${items.length ? items.map((it, i) => masterRow(type, it, i, items.length)).join('') : '<div class="empty">ยังไม่มีรายการ</div>'}</div>
   </section>`;
+}
+
+/** รายชื่อพนักงาน: บอกว่าใช้ที่ไหน + ปุ่มนำเข้าชื่อที่ใช้อยู่แล้วในระบบ */
+function personHelp(items) {
+  const listed = items.map(x => x.Name);
+  const missing = S.owners.filter(n => listed.indexOf(n) === -1);
+  return `<p class="hint" style="margin:0">ใช้ร่วมกันทุกช่อง: เข้าสู่ระบบ · ผู้รับผิดชอบงานขาย · ผู้รับผิดชอบ Task · ตัวกรอง — ซ่อนคนที่ลาออกได้ (ข้อมูลเก่ายังอยู่) · พิมพ์ชื่อใหม่ในช่องผู้รับผิดชอบได้เหมือนเดิม</p>
+    ${missing.length ? `<button type="button" class="btn btn-soft btn-block" onclick="importPeopleNow()">นำเข้าชื่อที่ใช้อยู่ในระบบ (${missing.length} คน)</button>` : ''}`;
+}
+
+async function importPeopleNow() {
+  const r = await post('importPeople');
+  if (!r.success) return toast(r.message);
+  applyWrite(r);
+  toast(r.message, 'ok');
+  viewSettings();
 }
 
 function masterRow(type, it, i, total) {
@@ -1600,7 +1621,7 @@ function taskStage(t) {
 }
 
 const taskSortKey = t => dOnly(t.Due_Date) + ' ' + (hhmm(t.Due_Time) || '24:00');
-const byDue = (a, b) => taskSortKey(a).localeCompare(taskSortKey(b));
+const byDue = (a, b) => taskSortKey(a).localeCompare(taskSortKey(b)) || prRank(a.Priority) - prRank(b.Priority);
 
 /** Task ของฉันที่ต้องสนใจตอนนี้ (เกินกำหนด + วันนี้) — ใช้กับตัวเลขบนเมนูและการ์ดเตือน */
 function myTaskAlerts() {
@@ -1860,16 +1881,19 @@ function notifyControl() {
 function taskCard(t) {
   const due = taskDue(t), done = isDone(t);
   const opp = t.Opportunity_ID ? S.byId.get(t.Opportunity_ID) : null;
+  const cust = taskCustomer(t);
   const id = esc(t.Task_ID);
   const by = t.Created_By && t.Created_By !== t.Assignee ? ' · มอบหมายโดย ' + esc(t.Created_By) : '';
+  const pr = t.Priority === 'Urgent' ? 'red' : t.Priority === 'High' ? 'amber' : '';
   return `<div class="card task-card ${done ? 'is-done' : ''} ${due.key === 'overdue' ? 'is-overdue' : ''}">
     <button type="button" class="task-check" onclick="toggleTask('${id}',${!done})" aria-label="${done ? 'ย้ายกลับเป็นงานค้าง' : 'ทำเสร็จแล้ว'}">${done ? I.check : ''}</button>
     <button type="button" class="task-body" onclick="taskForm('${id}')">
       <strong class="task-title">${isTaskUnread(t) ? '<i class="task-dot" title="ยังไม่ได้เปิดดู"></i>' : ''}${esc(t.Title)}</strong>
-      <span class="meta">${esc(t.Assignee)}${by}</span>
-      ${opp ? `<span class="meta truncate">งาน: ${esc(opp.Project_Name)}</span>` : ''}
+      <span class="meta">${t.Type ? esc(t.Type) + ' · ' : ''}${esc(t.Assignee)}${by}</span>
+      ${opp ? `<span class="meta truncate">งาน: ${esc(opp.Project_Name)}${cust && cust.Company_Name ? ' · ' + esc(cust.Company_Name) : ''}</span>`
+        : cust && cust.Company_Name ? `<span class="meta truncate">ลูกค้า: ${esc(cust.Company_Name)}</span>` : ''}
     </button>
-    <span class="badge tone-${due.tone}">${esc(due.label)}</span>
+    <span class="task-badges"><span class="badge tone-${due.tone}">${esc(due.label)}</span>${pr && !done ? `<span class="badge tone-${pr}">${esc(t.Priority)}</span>` : ''}</span>
   </div>`;
 }
 
@@ -1893,9 +1917,37 @@ function viewTasks() {
     $('#app').innerHTML = header('Task', '', "go('dashboard')") + `<div class="page"><div class="empty">ต้องอัปเดต Apps Script เป็นรุ่นล่าสุดก่อน จึงจะใช้ Task ได้</div></div>`;
     return;
   }
-  const me = myName();
+  const r = taskListHtml();
+  const seg = (k, label) => `<button type="button" class="${S.taskScope === k ? 'is-active' : ''}" onclick="setTaskScope('${k}')">${label}</button>`;
+  const f = S.taskFilter;
+  $('#app').innerHTML = header('Task', r.sub) + `<div class="page">
+    <div class="seg">${seg('mine', 'ของฉัน')}${seg('byme', 'ฉันมอบหมาย')}${seg('team', 'ทั้งทีม')}</div>
+    <button type="button" class="btn btn-primary btn-block" onclick="taskForm()">${I.plus}เพิ่ม Task</button>
+    ${notifyControl()}
+    <div class="stack">
+      <input id="tq" class="field" value="${esc(S.taskQuery)}" placeholder="ค้นหา Task / ลูกค้า / งานขาย / ผู้รับผิดชอบ" oninput="onTaskSearch(this.value)" autocomplete="off">
+      <div class="grid-2">
+        ${S.taskScope === 'mine' ? '' : `<select class="field field-sm" onchange="setTaskFilter('person',this.value)"><option value="">ทุกผู้รับผิดชอบ</option>${peopleNames().map(n => `<option ${f.person === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>`}
+        <select class="field field-sm" onchange="setTaskFilter('priority',this.value)"><option value="">ทุกความสำคัญ</option>${priorityList().map(p => `<option ${f.priority === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div id="taskList" class="stack">${r.html}</div>
+  </div>`;
+}
+
+/** ช่องที่ใช้ค้น Task — เทียบทีละช่อง ไม่ค้นในรายละเอียดยาวๆ (แบบเดียวกับหน้างานขาย) */
+function taskFields(t) {
+  const opp = t.Opportunity_ID ? S.byId.get(t.Opportunity_ID) : null, cust = taskCustomer(t);
+  return [t.Title, cust && cust.Company_Name, opp && opp.Project_Name, t.Opportunity_ID, t.Assignee, t.Created_By, t.Type];
+}
+
+/** รายการ Task ตามมุมมอง + ตัวกรอง + คำค้น → HTML (วาดใหม่เฉพาะส่วนนี้ตอนพิมพ์ค้นหา ช่องพิมพ์จะไม่เสียโฟกัส) */
+function taskListHtml() {
+  const me = myName(), f = S.taskFilter;
   const inScope = { mine: t => t.Assignee === me, byme: t => t.Created_By === me && t.Assignee !== me, team: () => true }[S.taskScope] || (() => true);
-  const list = S.tasks.filter(inScope);
+  let list = S.tasks.filter(inScope).filter(t =>
+    (S.taskScope === 'mine' || !f.person || t.Assignee === f.person) && (!f.priority || (t.Priority || 'Normal') === f.priority));
+  list = searchRank(list, S.taskQuery, taskFields);
   const open = list.filter(t => !isDone(t)).sort(byDue);
   const done = list.filter(isDone).sort((a, b) => String(b.Done_At).localeCompare(String(a.Done_At)));
   const group = k => open.filter(t => taskDue(t).key === k);
@@ -1903,21 +1955,22 @@ function viewTasks() {
   const sec = (title, items, kind) => items.length ? `<section class="stack">
       <h2 class="section-title ${kind || ''}">${title}<span class="count ${kind || ''}">${items.length}</span></h2>
       ${items.map(taskCard).join('')}</section>` : '';
-  const seg = (k, label) => `<button type="button" class="${S.taskScope === k ? 'is-active' : ''}" onclick="setTaskScope('${k}')">${label}</button>`;
-
-  $('#app').innerHTML = header('Task', open.length + ' งานค้าง' + (over.length ? ' · เกินกำหนด ' + over.length : '')) + `<div class="page">
-    <div class="seg">${seg('mine', 'ของฉัน')}${seg('byme', 'ฉันมอบหมาย')}${seg('team', 'ทั้งทีม')}</div>
-    <button type="button" class="btn btn-primary btn-block" onclick="taskForm()">${I.plus}เพิ่ม Task</button>
-    ${notifyControl()}
-    ${open.length ? '' : `<div class="empty">${S.taskScope === 'mine' ? 'ไม่มีงานค้าง 🎉' : 'ไม่มีงานค้าง'}</div>`}
-    ${sec('เกินกำหนด', over, 'is-danger')}
-    ${sec('วันนี้', group('today'), 'is-warn')}
-    ${sec('พรุ่งนี้', group('soon'))}
-    ${sec('ถัดไป', group('later'))}
-    ${done.length ? `<button type="button" class="btn btn-soft btn-block" onclick="toggleTaskDone()">${S.taskShowDone ? 'ซ่อน' : 'แสดง'}งานที่เสร็จแล้ว (${done.length})</button>` : ''}
-    ${S.taskShowDone ? sec('เสร็จแล้ว', done) : ''}
-  </div>`;
+  const q = String(S.taskQuery || '').trim();
+  const empty = q ? 'ไม่พบ Task ที่มีคำว่า “' + esc(q) + '”' : (f.person || f.priority) ? 'ไม่มี Task ที่ตรงกับตัวกรอง' : S.taskScope === 'mine' ? 'ไม่มีงานค้าง 🎉' : 'ไม่มีงานค้าง';
+  const html = (open.length ? '' : `<div class="empty">${empty}</div>`)
+    + sec('เกินกำหนด', over, 'is-danger') + sec('วันนี้', group('today'), 'is-warn') + sec('พรุ่งนี้', group('soon')) + sec('ถัดไป', group('later'))
+    + (done.length ? `<button type="button" class="btn btn-soft btn-block" onclick="toggleTaskDone()">${S.taskShowDone ? 'ซ่อน' : 'แสดง'}งานที่เสร็จแล้ว (${done.length})</button>` : '')
+    + (S.taskShowDone ? sec('เสร็จแล้ว', done) : '');
+  return { html: html, sub: open.length + ' งานค้าง' + (over.length ? ' · เกินกำหนด ' + over.length : '') };
 }
+
+function onTaskSearch(value) {
+  S.taskQuery = value;
+  const r = taskListHtml();
+  const box = $('#taskList'); if (box) box.innerHTML = r.html;
+  const sub = $('#hdrSub'); if (sub) sub.textContent = r.sub;
+}
+function setTaskFilter(key, value) { S.taskFilter[key] = value; viewTasks(); }
 
 function setTaskScope(k) { S.taskScope = k; viewTasks(); }
 function toggleTaskDone() { S.taskShowDone = !S.taskShowDone; viewTasks(); }
@@ -1935,9 +1988,64 @@ function oppTasksSection(o) {
 }
 
 /** รายชื่อสำหรับช่องผู้รับผิดชอบ — รวมจากงานขายและ Task ที่เคยมอบหมาย */
+/**
+ * รายชื่อพนักงานชุดเดียวที่ทุกช่องใช้ (ผู้รับผิดชอบงานขาย · ผู้รับผิดชอบ Task · ตัวกรอง)
+ * ลำดับ: รายชื่อในหน้าตั้งค่า → ชื่อที่พบในข้อมูล (หลังบ้านเรียงมาให้แล้ว) · ไม่รวมคนที่ซ่อนไว้
+ */
+function hiddenPeople() { return ((S.master && S.master.Person) || []).filter(x => !x.Active).map(x => x.Name); }
 function peopleNames() {
-  return mergeList([myName()].concat(S.owners), S.tasks.map(t => t.Assignee)).filter(Boolean)
-    .filter((n, i, a) => a.indexOf(n) === i);
+  const hidden = hiddenPeople(), out = [];
+  [].concat(S.owners, [myName()], S.tasks.map(t => t.Assignee)).forEach(n => {
+    n = String(n == null ? '' : n).trim();
+    if (n && out.indexOf(n) === -1 && hidden.indexOf(n) === -1) out.push(n);
+  });
+  return out;
+}
+
+/** ประเภท Task = ประเภท Activity ของระบบ (ยกเว้นเปลี่ยนสถานะ) · ความสำคัญ = ชุดเดียวกับงานขาย */
+const taskTypes = () => (S.activityTypes.length ? S.activityTypes : ['Note', 'Call', 'Survey', 'Quotation', 'Follow-up']).filter(t => t !== 'Status Change');
+const priorityList = () => S.priorities.length ? S.priorities : ['Low', 'Normal', 'High', 'Urgent'];
+const PRIORITY_RANK = { Urgent: 0, High: 1, Normal: 2, Low: 3 };
+const prRank = p => PRIORITY_RANK[p] === undefined ? 2 : PRIORITY_RANK[p];
+const taskCustomer = t => {
+  if (t.Customer_ID) { const c = S.customers.find(x => x.Customer_ID === t.Customer_ID); if (c) return c; }
+  const o = t.Opportunity_ID && S.byId.get(t.Opportunity_ID);
+  return o ? o.Customer : null;
+};
+
+/* ---------- ฟอร์ม Task: ลูกค้า ↔ งานขาย ผูกกันเหมือนหน้าขอราคา ---------- */
+function taskOppItems(custId) {
+  const rows = custId ? S.rows.filter(o => o.Customer_ID === custId) : S.rows;
+  return [{ value: '', label: 'ไม่เชื่อมกับงานขาย' }].concat(rows.map(o => ({
+    value: o.Opportunity_ID, label: o.Project_Name, sub: o.Opportunity_ID + ' · ' + (o.Customer.Company_Name || '') + ' · ' + o.Status
+  })));
+}
+function modalPicker(name) { const el = document.querySelector('#modal input[name="' + name + '"]'); return el ? el.closest('.picker') : null; }
+/** ตั้งค่าช่องเลือกแบบค้นหา (ค่าจริง + ข้อความที่เห็น) */
+function setPicker(name, value) {
+  const box = modalPicker(name);
+  if (!box) return;
+  const it = PICKERS[box.id].items.find(x => String(x.value) === String(value));
+  const hidden = box.querySelector('input[type="hidden"]');
+  if (hidden) hidden.value = value;
+  box.querySelector('.picker-input').value = it ? it.label : '';
+}
+/** เลือกลูกค้า → รายการงานขายเหลือเฉพาะของลูกค้านี้ (งานที่เลือกไว้ไม่ใช่ของลูกค้านี้ ล้างออก) */
+function onTaskCustomer(custId) {
+  const box = modalPicker('Opportunity_ID');
+  if (!box) return;
+  PICKERS[box.id].items = taskOppItems(custId);
+  const cur = box.querySelector('input[type="hidden"]').value;
+  const o = cur && S.byId.get(cur);
+  if (o && custId && o.Customer_ID !== custId) setPicker('Opportunity_ID', '');
+}
+/** เลือกงานขาย → ใส่ลูกค้าของงานนั้นให้เอง */
+function onTaskOpp(oppId) {
+  const o = oppId && S.byId.get(oppId);
+  if (!o) return;
+  setPicker('Customer_ID', o.Customer_ID);
+  const box = modalPicker('Opportunity_ID');
+  if (box) PICKERS[box.id].items = taskOppItems(o.Customer_ID);
 }
 
 function taskForm(id, preset) {
@@ -1946,20 +2054,26 @@ function taskForm(id, preset) {
   if (id && isTaskUnread(t)) { markTaskRead(t); S.repaintPending = true; }   // ปิดหน้าต่างแล้วจุดแดงหายไป
   const done = isDone(t);
   const opp = t.Opportunity_ID ? S.byId.get(t.Opportunity_ID) : null;
-  const opps = [{ value: '', label: 'ไม่เชื่อมกับงานขาย' }].concat(S.rows.map(o => ({
-    value: o.Opportunity_ID, label: o.Project_Name, sub: o.Opportunity_ID + ' · ' + (o.Customer.Company_Name || '')
-  })));
+  const custId = t.Customer_ID || (opp ? opp.Customer_ID : '');
+  const types = taskTypes();
+  if (t.Type && types.indexOf(t.Type) === -1) types.push(t.Type);
   modal(`<form class="stack" onsubmit="saveTaskForm(event,'${esc(id || '')}')">
     ${modalHead(id ? 'แก้ไข Task' : 'เพิ่ม Task')}
     ${inputField('Title', 'ชื่อ Task', t.Title, 'text', true)}
+    <div class="grid-2">
+      ${selectField('Type', 'ประเภท', [''].concat(types), t.Type || '')}
+      ${selectField('Priority', 'ความสำคัญ', priorityList(), t.Priority || 'Normal')}
+    </div>
     ${pickerField({ name: 'Assignee', label: 'ผู้รับผิดชอบ', value: t.Assignee, required: true, allowNew: true,
-      items: peopleNames().map(n => ({ value: n, label: n })), hint: 'พิมพ์ชื่อ หรือเลือกจากรายชื่อ' })}
+      items: peopleNames().map(n => ({ value: n, label: n })), hint: 'พิมพ์ชื่อ หรือเลือกจากรายชื่อพนักงาน' })}
     <div class="grid-2">
       ${inputField('Due_Date', 'วันที่ต้องทำ', t.Due_Date, 'date', true)}
       ${inputField('Due_Time', 'เวลา (ไม่บังคับ)', hhmm(t.Due_Time), 'time')}
     </div>
+    ${pickerField({ name: 'Customer_ID', label: 'ลูกค้า (ไม่บังคับ)', value: custId,
+      items: [{ value: '', label: 'ไม่ระบุลูกค้า' }].concat(customerItems()), hint: 'พิมพ์ชื่อบริษัท แผนก หรือเบอร์โทร', onPick: 'onTaskCustomer' })}
+    ${pickerField({ name: 'Opportunity_ID', label: 'เชื่อมกับงานขาย (ไม่บังคับ)', value: t.Opportunity_ID || '', items: taskOppItems(custId), hint: 'พิมพ์ชื่องานหรือเลขที่งาน', onPick: 'onTaskOpp' })}
     ${textField('Detail', 'รายละเอียด', t.Detail, 3)}
-    ${pickerField({ name: 'Opportunity_ID', label: 'เชื่อมกับงานขาย (ไม่บังคับ)', value: t.Opportunity_ID || '', items: opps, hint: 'พิมพ์ชื่องานหรือเลขที่งาน' })}
     ${id ? `<p class="hint">สร้างโดย ${esc(t.Created_By || '-')} · ${fmtDateTime(t.Created_At)}${done ? ' · เสร็จโดย ' + esc(t.Done_By || '-') + ' · ' + fmtDateTime(t.Done_At) : ''}</p>` : ''}
     <button class="btn btn-primary btn-block">${id ? 'บันทึก' : 'เพิ่ม Task'}</button>
     ${id ? `<div class="grid-2">
@@ -2028,8 +2142,9 @@ function customerRowsHtml() {
   if (!rows.length) return '<div class="empty">ไม่พบลูกค้า</div>';
   return rows.map(c => {
     const jobs = S.rows.filter(o => o.Customer_ID === c.Customer_ID).length;
+    const tks = customerTasks(c.Customer_ID).filter(t => !isDone(t)).length;
     return `<button type="button" class="card card-btn stack-sm" onclick="customerForm('${esc(c.Customer_ID)}')">
-      <div class="row-between"><strong class="grow truncate">${esc(c.Company_Name)}</strong>${jobs ? `<span class="badge tone-slate">${jobs} งาน</span>` : ''}</div>
+      <div class="row-between"><strong class="grow truncate">${esc(c.Company_Name)}</strong><span class="row" style="gap:4px">${jobs ? `<span class="badge tone-slate">${jobs} งาน</span>` : ''}${tks ? `<span class="badge tone-amber">${tks} Task</span>` : ''}</span></div>
       <div class="meta">${esc(c.Contact_Name || '-')}${c.Department ? ' · ' + esc(c.Department) : ''} · ${esc(c.Phone || '-')}</div>
     </button>`;
   }).join('');
@@ -2157,6 +2272,12 @@ async function submitFiles(e, id) {
   render();
 }
 
+/** Task ของลูกค้า — ผูกตรง หรือผ่านงานขายของลูกค้านั้น */
+function customerTasks(custId) {
+  if (!S.tasksEnabled || !custId) return [];
+  return S.tasks.filter(t => { const c = taskCustomer(t); return c && c.Customer_ID === custId; });
+}
+
 function customerForm(id) {
   const c = id ? (S.customers.find(x => x.Customer_ID === id) || {}) : {};
   modal(`<form class="stack" onsubmit="saveCustomerForm(event,'${esc(id || '')}')">
@@ -2171,7 +2292,18 @@ function customerForm(id) {
     ${inputField('Map_URL', 'Google Maps URL', c.Map_URL, 'url')}
     ${textField('Remark', 'หมายเหตุ', c.Remark, 3)}
     <button class="btn btn-primary btn-block">บันทึก</button>
+    ${id && S.tasksEnabled ? customerTaskBlock(id) : ''}
   </form>`);
+}
+
+function customerTaskBlock(custId) {
+  const open = customerTasks(custId).filter(t => !isDone(t)).sort(byDue);
+  return `<div class="stack-sm cust-tasks">
+    <div class="row-between"><span class="label" style="margin:0">Task ของลูกค้านี้${open.length ? ' (' + open.length + ')' : ''}</span>
+      <button type="button" class="btn btn-outline btn-sm" onclick="closeModal();taskForm('',{Customer_ID:'${esc(custId)}'})">${I.plus}เพิ่ม Task</button></div>
+    ${open.length ? open.slice(0, 5).map(t => `<button type="button" class="row-between cust-task" onclick="closeModal();go('tasks');taskForm('${esc(t.Task_ID)}')">
+      <span class="truncate grow">${esc(t.Title)}</span><span class="badge tone-${taskDue(t).tone}">${esc(taskDue(t).label)}</span></button>`).join('') : '<p class="hint" style="margin:0">ยังไม่มี Task ค้าง</p>'}
+  </div>`;
 }
 
 async function saveCustomerForm(e, id) {
