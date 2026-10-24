@@ -152,24 +152,43 @@ function pickerField(opts) {
   const items = (o.items || []).filter(x => x && x.value !== undefined && x.value !== null);
   PICKERS[id] = { items: items, allowNew: !!o.allowNew, name: o.name, onPick: o.onPick };
   const current = items.find(x => String(x.value) === String(o.value == null ? '' : o.value));
-  const shown = o.allowNew ? (o.value == null ? '' : o.value) : (current ? current.label : '');
+  const shown = o.allowNew ? (o.value == null ? '' : o.value) : (current && current.value !== '' ? current.label : '');
   return `<label class="picker" id="${id}"><span class="label">${o.label}${o.required ? ' *' : ''}</span>
     <input class="field picker-input" value="${esc(shown)}" placeholder="${esc(o.hint || 'พิมพ์ไม่กี่ตัวเพื่อค้นหา')}"
       autocomplete="off" ${o.allowNew ? `name="${o.name}" ${o.required ? 'required' : ''}` : ''}
-      oninput="pickerType('${id}')" onfocus="pickerType('${id}')" onkeydown="pickerKey(event,'${id}')" onblur="pickerBlur('${id}')">
+      oninput="pickerType('${id}')" onfocus="pickerOpen('${id}')" onclick="pickerOpen('${id}')" onkeydown="pickerKey(event,'${id}')" onblur="pickerBlur('${id}')">
     ${o.allowNew ? '' : `<input type="hidden" name="${o.name}" value="${esc(o.value == null ? '' : o.value)}" ${o.required ? 'required' : ''}>`}
     <div class="picker-list" hidden></div></label>`;
 }
 
 function pickerOf(id) { return { box: document.getElementById(id), state: PICKERS[id] }; }
 
-/** วาดรายการที่ใกล้เคียงคำที่พิมพ์ */
-function pickerType(id) {
+/** แตะช่อง → แสดงรายการทั้งหมด (เลือกได้เลย) และเลือกข้อความเดิมไว้ พิมพ์ทับเพื่อค้นหาได้ทันที */
+function pickerOpen(id) {
+  const { box } = pickerOf(id);
+  if (!box) return;
+  const list = box.querySelector('.picker-list');
+  if (!list.hidden) return;
+  pickerType(id, true);
+  const input = box.querySelector('.picker-input');
+  try { input.select(); } catch (e) {}
+}
+
+/** ค่าที่เลือกอยู่ตอนนี้ของช่องนี้ */
+function pickerValue(box, state) {
+  if (state.allowNew) return box.querySelector('.picker-input').value.trim();
+  const h = box.querySelector('input[type="hidden"]');
+  return h ? h.value : '';
+}
+
+/** วาดรายการ — showAll = แสดงทั้งหมด (ตอนเพิ่งแตะช่อง) · ไม่งั้นค้นตามที่พิมพ์ */
+function pickerType(id, showAll) {
   const { box, state } = pickerOf(id);
   if (!box || !state) return;
-  const q = box.querySelector('.picker-input').value;
+  const q = showAll ? '' : box.querySelector('.picker-input').value;
   const list = box.querySelector('.picker-list');
-  const hits = searchRank(state.items, q, x => [x.label, x.sub, x.extra]).slice(0, 12);
+  const cur = pickerValue(box, state);
+  const hits = searchRank(state.items, q, x => [x.label, x.sub, x.extra]).slice(0, q.trim() ? 40 : 200);
   state.hits = hits;
   state.active = -1;
   if (!hits.length) {
@@ -177,7 +196,7 @@ function pickerType(id) {
       ? '<div class="picker-empty">ไม่มีในรายการ — พิมพ์ชื่อใหม่ได้เลย</div>'
       : '<div class="picker-empty">ไม่พบรายการที่ตรง</div>';
   } else {
-    list.innerHTML = hits.map((x, i) => `<button type="button" class="picker-item" data-i="${i}"
+    list.innerHTML = hits.map((x, i) => `<button type="button" class="picker-item${String(x.value) === String(cur) ? ' is-current' : ''}${x.value === '' ? ' is-none' : ''}" data-i="${i}"
       onmousedown="event.preventDefault();pickerPick('${id}',${i})">
       <span class="picker-main">${esc(x.label)}</span>${x.sub ? `<span class="picker-sub">${esc(x.sub)}</span>` : ''}</button>`).join('');
   }
@@ -190,7 +209,7 @@ function pickerPick(id, i) {
   const hit = (state.hits || [])[i];
   if (!hit) return;
   const input = box.querySelector('.picker-input');
-  input.value = state.allowNew ? hit.value : hit.label;
+  input.value = state.allowNew ? hit.value : (hit.value === '' ? '' : hit.label);
   const hidden = box.querySelector('input[type="hidden"]');
   if (hidden) hidden.value = hit.value;
   box.querySelector('.picker-list').hidden = true;
@@ -228,7 +247,7 @@ function pickerBlur(id) {
     const hidden = box.querySelector('input[type="hidden"]');
     const input = box.querySelector('.picker-input');
     const cur = state.items.find(x => String(x.value) === String(hidden.value));
-    input.value = cur ? cur.label : '';
+    input.value = cur && cur.value !== '' ? cur.label : '';
   }, 120);
 }
 
@@ -2028,7 +2047,7 @@ function setPicker(name, value) {
   const it = PICKERS[box.id].items.find(x => String(x.value) === String(value));
   const hidden = box.querySelector('input[type="hidden"]');
   if (hidden) hidden.value = value;
-  box.querySelector('.picker-input').value = it ? it.label : '';
+  box.querySelector('.picker-input').value = it && it.value !== '' ? it.label : '';
 }
 /** เลือกลูกค้า → รายการงานขายเหลือเฉพาะของลูกค้านี้ (งานที่เลือกไว้ไม่ใช่ของลูกค้านี้ ล้างออก) */
 function onTaskCustomer(custId) {
